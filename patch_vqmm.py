@@ -102,7 +102,7 @@ def patch_dll(dll_path=None):
         # 3. Sửa lỗi trong LayDoRuongPhu: ở step == 2 sau khi chọn "Rương phụ (X món)" và gán step = -1,
         # code gốc nhảy thẳng vào khối kiểm tra (step == -1) trong cùng 1 frame khiến gửi gói getItem(2, 0)
         # trước khi server kịp mở Rương phụ và làm reset step = 0 ngay lập tức.
-        # Vá lệnh jmp để thoát hàm cập nhật lastTime, chờ nhịp kế tiếp (500ms sau) mới gửi getItem(2, 0).
+        # Vá lệnh jmp để thoát hàm cập nhật lastTime, chờ nhịp kế tiếp mới gửi getItem(2, 0).
         (
             "Tab1_Fix_Step2_Fallthrough",
             0x39A75F,
@@ -199,6 +199,20 @@ def patch_dll(dll_path=None):
                 + "90 " * 19
             ),
         ),
+        # 6. Tăng tốc độ quay VQMM & nhận Rương phụ gấp 2.5 lần:
+        # Giảm delay giữa mỗi nhịp từ 500ms (0x1F4) xuống 200ms (0xC8) cho cả Tab1 (0x39ADC1) và Tab2 (0x53084C).
+        (
+            "Tab1_SpeedUp_VQMM_200ms",
+            0x39ADC1,
+            bytes.fromhex("ba f4 01 00 00"),
+            bytes.fromhex("ba c8 00 00 00"),
+        ),
+        (
+            "Tab2_SpeedUp_VQMM_200ms",
+            0x53084C,
+            bytes.fromhex("ba f4 01 00 00"),
+            bytes.fromhex("ba c8 00 00 00"),
+        ),
     ]
 
     source_path = bak_path if os.path.exists(bak_path) else dll_path
@@ -225,8 +239,22 @@ def patch_dll(dll_path=None):
         data[foff : foff + len(replacement)] = replacement
         print(f"[OK] Đã vá {name} ({len(replacement)} bytes)")
 
-    with open(dll_path, "wb") as f:
-        f.write(data)
+    try:
+        with open(dll_path, "wb") as f:
+            f.write(data)
+    except PermissionError:
+        # Windows cho phép đổi tên DLL đang chạy và tạo file mới vào đúng vị trí cũ
+        old_path = dll_path + ".old"
+        if os.path.exists(old_path):
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass
+        os.replace(dll_path, old_path)
+        with open(dll_path, "wb") as f:
+            f.write(data)
+        print("[THÔNG BÁO] Game đang mở nên đã ghi sẵn bản vá mới. Hãy khởi động lại NgocRongViet.exe để áp dụng!")
+
     print(f"[HOÀN TẤT] Đã cập nhật thành công: {dll_path}")
     return dll_path
 
