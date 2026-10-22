@@ -108,17 +108,18 @@ def memory_status():
 
 
 def game_windows():
-    """{pid: hwnd} các cửa sổ Unity đang hiện"""
+    """{pid: hwnd} cửa sổ Unity của từng game (kể cả đang bị ẩn)"""
     out = {}
 
     @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     def cb(hwnd, _):
         cls = ctypes.create_unicode_buffer(64)
         user32.GetClassNameW(hwnd, cls, 64)
-        if cls.value == "UnityWndClass" and user32.IsWindowVisible(hwnd):
+        if cls.value == "UnityWndClass":
             pid = wintypes.DWORD()
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            out[pid.value] = hwnd
+            if pid.value not in out or user32.IsWindowVisible(hwnd):  # có cửa sổ đang hiện thì ưu tiên nó
+                out[pid.value] = hwnd
         return True
 
     user32.EnumWindows(cb, 0)
@@ -138,17 +139,23 @@ def hide_window(hwnd):
     return r.left, r.top, ex
 
 
-def show_window(hwnd, saved):
-    x, y, ex = saved
+def show_window(hwnd, saved=None):
+    """Đưa cửa sổ game về màn hình. Không có vị trí cũ (bảng mở lại khi game đang ẩn) -> đặt ở góc trên trái."""
+    if saved:
+        x, y, ex = saved
+    else:
+        x, y = 100, 100
+        ex = (user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
     user32.ShowWindow(hwnd, 0)
     user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex)
     user32.SetWindowPos(hwnd, None, x, y, 0, 0, SWP_MOVE_ONLY)
     user32.ShowWindow(hwnd, 5)  # SW_SHOW
+    user32.ShowWindow(hwnd, 9)  # SW_RESTORE (phòng khi đang thu nhỏ)
 
 
 def load_config():
     beside = os.path.join(APP_DIR, "NgocRongViet.exe")
-    cfg = {"exePath": beside if os.path.exists(beside) else find_default_exe_path(), "hiddenFps": 20, "watchdog": False}
+    cfg = {"exePath": beside if os.path.exists(beside) else find_default_exe_path(), "hiddenFps": 5, "watchdog": False}
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, encoding="utf-8") as fh:
             cfg.update(json.load(fh))
@@ -176,7 +183,7 @@ def list_game_pids():
 # Địa chỉ trong GameAssembly.dll (RVA) - dịch ngược từ client hiện tại, client cập nhật thì phải dò lại
 SLOT = {"bh": 0xC08BB8, "fg": 0xC09530, "ft": 0xC09650, "jb": 0xC09E90, "rs": 0xBF61D0}  # ô TypeInfo của class
 FLAGS = {"ts": ("rs", 0x10), "nhat": ("rs", 0x40), "ak": ("fg", 0x0), "ahs": ("fg", 0x20)}  # Tàn sát, Tự nhặt, Tự đánh, Tự hồi sinh
-CAVE, FPS_APPLY = 0x330CE0, 0x331180          # cave ngủ (bắt đầu bằng call FPS_APPLY) - xem patch_vqmm.py
+CAVE, FPS_APPLY, LOGIC_HOOK = 0x330CE0, 0x331180, 0x5087D5  # cave ngủ / áp FPS / FixedUpdate chạy hoạt ảnh chiêu - xem patch_vqmm.py
 D_PICKED, D_FORCE, D_FPS_REQ = 0xEFBD20, 0xEFBD80, 0xEFBD84
 
 
@@ -233,7 +240,8 @@ class GameMemory:
         return self.ptr(klass + 0xB8) if klass else 0  # 0 khi class chưa khởi tạo
 
     def can_hide(self):
-        return self.read(self.base + CAVE, 1) == b"\xe8" and self.read(self.base + FPS_APPLY, 2) == b"\x8b\x05"
+        return (self.read(self.base + CAVE, 1) == b"\xe8" and self.read(self.base + FPS_APPLY, 2) == b"\x8b\x05"
+                and self.read(self.base + LOGIC_HOOK, 5) == bytes.fromhex("e8e689e2ff"))  # bản có hoạt ảnh chiêu theo logic
 
     def status(self):
         s = {"ready": False, "canHide": self.can_hide(), "flags": {}}
@@ -294,6 +302,7 @@ class Game:
         self.hwnd = None
         self.hidden = False
         self.saved_win = None  # (x, y, exstyle) trước khi ẩn
+        self.hidden_fps = 0
         self.status = {}
         self.cpu_prev = None
         self.cpu_pct = 0.0
@@ -345,8 +354,8 @@ class PanelApp:
         ttk.Button(bar2, text="Hiện tất cả", command=lambda: self.set_hidden(list(self.games), False)).pack(side="left", padx=2)
         ttk.Label(bar2, text="   FPS khi ẩn:").pack(side="left")
         self.var_fps = tk.IntVar(value=self.cfg["hiddenFps"])
-        ttk.Spinbox(bar2, from_=1, to=60, width=4, textvariable=self.var_fps, command=self.save_opts).pack(side="left")
-        ttk.Label(bar2, text="(20 = đánh đủ nhanh mà nhẹ; 10 = nhẹ hơn nhưng đánh chậm một nửa)").pack(side="left", padx=4)
+        ttk.Spinbox(bar2, from_=3, to=60, width=4, textvariable=self.var_fps, command=self.save_opts).pack(side="left")
+        ttk.Label(bar2, text="(5 = nhẹ nhất mà vẫn đánh đủ nhanh; dưới 3 game chạy chậm lại)").pack(side="left", padx=4)
         self.var_watch = tk.BooleanVar(value=self.cfg["watchdog"])
         ttk.Checkbutton(bar2, text="Tự mở lại game bị thoát", variable=self.var_watch, command=self.save_opts).pack(side="right")
 
@@ -372,6 +381,9 @@ class PanelApp:
             if pid not in self.games:
                 try:
                     game = Game(pid, GameMemory(pid), self.exe_of(pid))
+                    # bảng mở lại khi game đang ẩn -> nhận lại trạng thái để nút Hiện còn tác dụng
+                    if game.mem.can_hide() and game.mem.read(game.mem.base + D_FORCE, 1) != bytes(1):
+                        game.hidden, game.hidden_fps = True, max(3, self.cfg["hiddenFps"])
                 except OSError:
                     continue  # game vừa mở, chưa nạp xong -> thử lại lần sau
                 with self.lock:
@@ -385,7 +397,7 @@ class PanelApp:
         with self.lock:
             games = list(self.games.values())
         for g in games:
-            if not g.hidden and g.pid in wins:
+            if g.pid in wins:
                 g.hwnd = wins[g.pid]
             usage = process_usage(g.pid)
             if usage:
@@ -395,6 +407,8 @@ class PanelApp:
                     g.cpu_pct = (cpu - g.cpu_prev[0]) / 1e7 / (now - g.cpu_prev[1]) / ncpu * 100
                 g.cpu_prev = (cpu, now)
             try:
+                if g.hidden:
+                    g.mem.set_fps(g.hidden_fps)  # nhắc lại mỗi giây: lệnh đổi FPS có thể lỡ lúc cửa sổ đang ẩn/hiện
                 g.status = g.mem.status()
             except OSError:
                 pass  # đang đổi màn hình / game đang thoát
@@ -456,7 +470,7 @@ class PanelApp:
     def set_hidden(self, pids, hide):
         if not pids:
             return
-        fps = max(1, min(60, self.var_fps.get()))
+        fps = max(3, min(60, self.var_fps.get()))
         for pid in pids:
             g = self.games.get(pid)
             if not g:
@@ -466,10 +480,11 @@ class PanelApp:
                 return
             if g.hwnd and hide and not g.hidden:
                 g.saved_win = hide_window(g.hwnd)
-            elif g.hwnd and not hide and g.saved_win:
-                show_window(g.hwnd, g.saved_win)
+            elif g.hwnd and not hide:
+                show_window(g.hwnd, g.saved_win)  # luôn kéo cửa sổ về, kể cả khi bảng không nhớ vị trí cũ
                 g.saved_win = None
             g.hidden = hide
+            g.hidden_fps = fps
             try:
                 g.mem.set_hidden(hide, fps)
             except OSError:
@@ -523,7 +538,7 @@ class PanelApp:
 
     def save_opts(self):
         try:
-            self.cfg["hiddenFps"] = max(1, min(60, self.var_fps.get()))
+            self.cfg["hiddenFps"] = max(3, min(60, self.var_fps.get()))
         except tk.TclError:
             return
         self.cfg["watchdog"] = self.var_watch.get()
@@ -534,7 +549,7 @@ class PanelApp:
         self.stop = True
         for g in list(self.games.values()):
             if g.hidden:
-                if g.hwnd and g.saved_win:
+                if g.hwnd:
                     show_window(g.hwnd, g.saved_win)
                 try:
                     g.mem.set_hidden(False, 0)

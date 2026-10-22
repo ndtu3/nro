@@ -294,16 +294,19 @@ def patch_dll(dll_path=None):
                 "58404439b1e00000007505e8c042d6ff33d2488bcbe8d6e70c0084c0743a33c9e89b94f8ff4885c00f84d04600004c39"
                 "7040742433c9e88594f8ff4885c00f84ba460000488b48404885c90f84ad46000033d2e898f1f8ff33c9e86194f8ff48"
                 "85c00f84964600004c3970480f848d060000488b0517938d004439b0e0000000750f488bc8e84642d6ff488b05ff928d"
-                "00488b80b8000000488b5830488b059d418d004439b0e000000075"
+                "00488b80b8000000488b5830488b059d418d004439b0e0000000750f488bc8e81c42d6ff488b0585418d00488b80b800"
+                "0000498bcf4438702b480f45cd4885db0f84284600003b4b180f83194600004438741920753b33c9e8d393f8ff4885c0"
+                "0f8408460000488b0d13998d00488b58484439b1e00000007505e8c141d6ff33d248"
             ),
             # FPS MOD <= 5 và không có menu / panel / ô nhập (ChatTextField) đang mở -> nền đen + bảng thông tin MOD
             # + 2 dòng "CPU máy: x%" (GetSystemTimes, toàn máy) và "Đã nhặt: N món"; ngược lại -> GameCanvas.paint như thường.
             # 0x330CE0 cave ngủ, 0x330E00 vẽ CPU/số món, 0x331100 bộ đếm nhặt đồ; biến lưu ở phần thừa .data 0xEFBD00
             # 0x331120: vẫn chạy hoạt ảnh chiêu của mình (bh.bdd/bh.bbl) - game chỉ gửi gói đánh khi hoạt ảnh chạy hết, thiếu nó là không đánh
-            # byte 0xEFBD80 != 0 (control_panel.py ẩn game) -> ngủ luôn, bỏ qua FPS / menu
             # 0x331180: int 0xEFBD84 != 0 -> Application.set_targetFrameRate(nó) rồi xoá về 0 (bảng điều khiển đổi FPS từ ngoài)
+            # byte 0xEFBD80 != 0 (control_panel.py ẩn game): cave vẽ trả về luôn, không vẽ gì; 0x3311C0 (gắn vào FixedUpdate)
+            # tăng chỉ số khung hình chiêu Char+0x490 mỗi nhịp logic -> FPS thấp (3-5) vẫn đánh đủ nhanh
             bytes.fromhex(
-                "e89b040000803d94b0bc00000f859c000000488b0557898d00488b80b80000000fbf401a83f8050f8f83f61c00488b05"
+                "e89b040000803d94b0bc00000f851f050000488b0557898d00488b80b80000000fbf401a83f8050f8f83f61c00488b05"
                 "c4828d00488b80b80000004c8b88d00000004d85c9740b41807910000f855ef61c004c8b88d80000004d85c9740b4180"
                 "7910000f8547f61c004c8b88e00000004d85c9740b41807910000f8530f61c00488b05917e8d00a80175234885c0741e"
                 "488b80b80000004885c07412488b004885c0740a807818000f8502f61c00534883ec304889d34889d9e8820300004889"
@@ -328,7 +331,9 @@ def patch_dll(dll_path=None):
                 "f048ff0518acbc00488b0dc97e8d00c3cccccccccccccccccccccccccccccccc53564883ec284889ce31c9e8b0eee6ff"
                 "4885c074434889c34883bbe80400000074364889d931d2e854c8e5ff4885c074278b8b900400003b48187d1c4889d948"
                 "89f24531c0e85642e6ff4889d94889f24531c0e848a5e5ff4883c4285e5bc3cc8b05feabbc0085c07501c351524883ec"
-                "20c705e9abbc000000000089c131d2e8fcd861004883c4205a59c3"
+                "20c705e9abbc000000000089c131d2e8fcd861004883c4205a59c3cccccccccccccccccccccccccccccccccccccccccc"
+                "534883ec20e866cd1b00803dafabbc0000743931c9e806eee6ff4885c0742d4889c34883bbe80400000074204889d931"
+                "d2e8aac7e5ff4885c074118b8b900400003b48187d06ff83900400004883c4205bc3"
             ),
         ),
         (
@@ -342,6 +347,12 @@ def patch_dll(dll_path=None):
             0x508FE0,
             bytes.fromhex("e8 ab 73 ff ff"),  # call GameCanvas.paint
             bytes.fromhex("e8 fb 7c e2 ff"),  # call SleepMode_Cave
+        ),
+        (
+            "SleepMode_Logic_Hook",
+            0x5087D5,  # Main.FixedUpdate: call dd.bpm (GameCanvas.update)
+            bytes.fromhex("e85657feff"),
+            bytes.fromhex("e8e689e2ff"),  # call 0x3311C0: dd.bpm rồi chạy hoạt ảnh chiêu khi đang ẩn
         ),
         # MOD chỉ nhận FPS 30..240 -> cho phép nhập 1..240. Lúc nạp cài đặt vẫn giữ 30..240:
         # FPS ngủ (<= 5) đã lưu bị bỏ qua -> mở game luôn hiện hình, muốn ngủ thì nhập lại FPS 5.
