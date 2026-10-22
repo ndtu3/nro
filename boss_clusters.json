@@ -1,0 +1,235 @@
+{
+  "maxZone": 15,
+  "zoneDelayMs": 15000,
+  "zoneLoadMs": 2500,
+  "zoneTimeoutMs": 5000,
+  "arriveDelayMs": 2500,
+  "waitNextMs": 10000,
+  "teleport": true,
+  "fleeHpPct": 0,
+  "resumeHpPct": 90,
+  "autoRevive": true,
+  "reviveMaxPerTarget": 0,
+  "reviveDelayMs": 3000,
+  "useBuffSkills": true,
+  "buffSkills": [
+    6,
+    12,
+    13
+  ],
+  "clusters": [
+    {
+      "name": "Tiểu Đội Sát Thủ (Nappa)",
+      "enabled": false,
+      "maps": [
+        "63-83"
+      ],
+      "members": [
+        "Số 4",
+        "Số 3",
+        "Số 2",
+        "Số 1",
+        "Tiểu đội trưởng"
+      ]
+    },
+    {
+      "name": "Tiểu Đội Sát Thủ (Namếc)",
+      "enabled": true,
+      "excludeMaps": [
+        "63-83"
+      ],
+      "members": [
+        "Số 4",
+        "Số 3",
+        "Số 2",
+        "Số 1",
+        "Tiểu đội trưởng"
+      ]
+    },
+    {
+      "name": "Fide Đại Ca",
+      "enabled": false,
+      "members": [
+        "Fide Đại Ca *"
+      ]
+    },
+    {
+      "name": "Fide Vàng",
+      "enabled": false,
+      "members": [
+        "Fide Vàng",
+        "Fide Gold"
+      ]
+    },
+    {
+      "name": "Black Fide",
+      "enabled": false,
+      "members": [
+        "Black Fide"
+      ]
+    },
+    {
+      "name": "King Cold",
+      "enabled": false,
+      "members": [
+        "King Cold"
+      ]
+    },
+    {
+      "name": "Android 19 & Dr.Kôrê",
+      "enabled": false,
+      "members": [
+        "Android 19",
+        "Dr.Kôrê"
+      ]
+    },
+    {
+      "name": "Android 13-14-15",
+      "enabled": false,
+      "members": [
+        "Android 13",
+        "Android 14",
+        "Android 15"
+      ]
+    },
+    {
+      "name": "Pic Poc King Kong",
+      "enabled": false,
+      "members": [
+        "Pic",
+        "Poc",
+        "King Kong"
+      ]
+    },
+    {
+      "name": "Android 21",
+      "enabled": false,
+      "members": [
+        "Android 21 *"
+      ]
+    },
+    {
+      "name": "Xên Bọ Hung",
+      "enabled": false,
+      "members": [
+        "Xên Bọ Hung *",
+        "Xên hoàn thiện"
+      ]
+    },
+    {
+      "name": "Xên con",
+      "enabled": false,
+      "members": [
+        "Xên con *"
+      ]
+    },
+    {
+      "name": "Siêu Bọ Hung",
+      "enabled": false,
+      "members": [
+        "Siêu bọ hung"
+      ]
+    },
+    {
+      "name": "Bojack",
+      "enabled": true,
+      "members": [
+        "Bojack",
+        "Bido",
+        "Zangya",
+        "Kogu",
+        "Bujin"
+      ]
+    },
+    {
+      "name": "Super Bojack",
+      "enabled": false,
+      "members": [
+        "Super Bojack"
+      ]
+    },
+    {
+      "name": "Cooler",
+      "enabled": false,
+      "members": [
+        "Cooler",
+        "Cooler 2"
+      ]
+    },
+    {
+      "name": "Golden Cooler",
+      "enabled": false,
+      "members": [
+        "Golden Cooler"
+      ]
+    },
+    {
+      "name": "Black Goku",
+      "enabled": false,
+      "members": [
+        "Black Goku",
+        "Super Black Goku"
+      ]
+    },
+    {
+      "name": "Fusion Zamasu",
+      "enabled": false,
+      "members": [
+        "Fusion Zamasu"
+      ]
+    },
+    {
+      "name": "Kid Bư",
+      "enabled": false,
+      "members": [
+        "Kid Bư"
+      ]
+    },
+    {
+      "name": "Baby",
+      "enabled": false,
+      "members": [
+        "Baby *"
+      ]
+    },
+    {
+      "name": "Kamin Oren",
+      "enabled": false,
+      "members": [
+        "Kamin",
+        "Oren",
+        "Kamioren"
+      ]
+    },
+    {
+      "name": "Cumber",
+      "enabled": false,
+      "members": [
+        "Cumber"
+      ]
+    },
+    {
+      "name": "Janemba Quỷ Đỏ",
+      "enabled": false,
+      "members": [
+        "Janemba Quỷ Đỏ"
+      ]
+    },
+    {
+      "name": "Ác Ma Picolo",
+      "enabled": false,
+      "members": [
+        "Ác Ma Picolo"
+      ]
+    },
+    {
+      "name": "Boss Nappa (Kuku, Mập đầu đinh, Rambo)",
+      "enabled": false,
+      "members": [
+        "Kuku",
+        "Mập đầu đinh",
+        "Rambo"
+      ]
+    }
+  ]
+}

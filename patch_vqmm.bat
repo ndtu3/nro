@@ -6,7 +6,7 @@ echo   VA LOI AUTO VQMM ^& TU DONG NHAN RUONG PHU
 echo ========================================================
 
 set "PY_EXE="
-where python >nul 2>nul && set "PY_EXE=python"
+python -c "import sys" >nul 2>nul && set "PY_EXE=python"
 if not defined PY_EXE (
     for /d %%D in ("%APPDATA%\uv\python\cpython-*") do (
         if exist "%%~fD\python.exe" set "PY_EXE=%%~fD\python.exe"

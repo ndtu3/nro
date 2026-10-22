@@ -5,7 +5,7 @@ cd /d "%~dp0"
 set "PYW_EXE="
 set "PY_EXE="
 where pythonw >nul 2>nul && set "PYW_EXE=pythonw"
-where python >nul 2>nul && set "PY_EXE=python"
+python -c "import sys" >nul 2>nul && set "PY_EXE=python"
 
 if not defined PY_EXE (
     for /d %%D in ("%APPDATA%\uv\python\cpython-*") do (
