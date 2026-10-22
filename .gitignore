@@ -5,3 +5,4 @@ __pycache__/
 boss_seen.txt
 GameAssembly.dll.old*
 panel_config.json
+dist/

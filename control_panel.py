@@ -6,34 +6,32 @@
 - Tự mở lại game bị thoát (văng / crash); đăng nhập lại nhờ "Tự động đăng nhập" của MOD.
 
 Chạy: run_panel.bat (hoặc python control_panel.py). Đóng bảng thì mọi game đang ẩn được hiện lại.
+Không dùng Frida (frida-agent làm game văng trên Windows Server cũ): đọc/ghi thẳng bộ nhớ game bằng
+ReadProcessMemory/WriteProcessMemory; việc phải chạy trong game (đổi FPS) do cave trong DLL vá làm.
 """
 
 import ctypes
 import json
 import os
 import queue
+import struct
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
-from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
 from tkinter import filedialog, messagebox, ttk
 
-sys.stdout.reconfigure(encoding="utf-8")
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".deps"))  # frida cài bởi run_panel.bat
-try:
-    import frida
-except ImportError:
-    print("[LỖI] Chưa cài frida. Chạy run_panel.bat để tự cài.")
-    sys.exit(1)
+if sys.stdout:  # bản .exe không cửa sổ console thì không có stdout
+    sys.stdout.reconfigure(encoding="utf-8")
 
 from auto_helper import find_default_exe_path
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-AGENT_PATH = os.path.join(BASE_DIR, "panel_agent.js")
-CONFIG_PATH = os.path.join(BASE_DIR, "panel_config.json")
+# bản .exe (PyInstaller): cấu hình nằm cạnh file .exe
+APP_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else BASE_DIR
+CONFIG_PATH = os.path.join(APP_DIR, "panel_config.json")
 PROCESS_NAME = "NgocRongViet.exe"
 GAME_ARGS = ["-screen-fullscreen", "0", "-screen-width", "400", "-screen-height", "240"]
 BELOW_NORMAL_PRIORITY_CLASS = 0x4000
@@ -51,6 +49,18 @@ kernel32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, w
 kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
 user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.IsWindowVisible.argtypes = [wintypes.HWND]
+user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+kernel32.ReadProcessMemory.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+kernel32.WriteProcessMemory.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+kernel32.K32EnumProcesses.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+kernel32.K32EnumProcessModulesEx.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_void_p), wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.DWORD]
+kernel32.K32GetModuleBaseNameW.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.LPWSTR, wintypes.DWORD]
+GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW = -20, 0x80, 0x40000
+SWP_MOVE_ONLY = 0x0001 | 0x0004 | 0x0010  # NOSIZE | NOZORDER | NOACTIVATE
 
 
 class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
@@ -115,8 +125,30 @@ def game_windows():
     return out
 
 
+def hide_window(hwnd):
+    """Đẩy cửa sổ ra ngoài màn hình + bỏ khỏi taskbar. Không dùng SW_HIDE: cửa sổ ẩn thì Unity ngừng gọi OnGUI,
+    mà game này xử lý gói tin server và hoạt ảnh ra chiêu trong OnGUI -> đứng im, không đánh. Trả về để khôi phục."""
+    r = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(r))
+    ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+    user32.ShowWindow(hwnd, 0)  # đổi kiểu taskbar chỉ có tác dụng khi ẩn rồi hiện lại
+    user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW)
+    user32.SetWindowPos(hwnd, None, -32000, -32000, 0, 0, SWP_MOVE_ONLY)
+    user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
+    return r.left, r.top, ex
+
+
+def show_window(hwnd, saved):
+    x, y, ex = saved
+    user32.ShowWindow(hwnd, 0)
+    user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex)
+    user32.SetWindowPos(hwnd, None, x, y, 0, 0, SWP_MOVE_ONLY)
+    user32.ShowWindow(hwnd, 5)  # SW_SHOW
+
+
 def load_config():
-    cfg = {"exePath": find_default_exe_path(), "hiddenFps": 10, "watchdog": False}
+    beside = os.path.join(APP_DIR, "NgocRongViet.exe")
+    cfg = {"exePath": beside if os.path.exists(beside) else find_default_exe_path(), "hiddenFps": 20, "watchdog": False}
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, encoding="utf-8") as fh:
             cfg.update(json.load(fh))
@@ -128,13 +160,140 @@ def save_config(cfg):
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
 
 
-class Game:
-    """Một tiến trình game đã gắn agent"""
+def list_game_pids():
+    """PID các tiến trình NgocRongViet.exe"""
+    arr = (wintypes.DWORD * 4096)()
+    needed = wintypes.DWORD()
+    kernel32.K32EnumProcesses(arr, ctypes.sizeof(arr), ctypes.byref(needed))
+    out = []
+    for pid in arr[: needed.value // 4]:
+        exe = PanelApp.exe_of(pid) if pid else None
+        if exe and os.path.basename(exe).lower() == PROCESS_NAME.lower():
+            out.append(pid)
+    return out
 
-    def __init__(self, pid, session, script, exe):
-        self.pid, self.session, self.script, self.exe = pid, session, script, exe
+
+# Địa chỉ trong GameAssembly.dll (RVA) - dịch ngược từ client hiện tại, client cập nhật thì phải dò lại
+SLOT = {"bh": 0xC08BB8, "fg": 0xC09530, "ft": 0xC09650, "jb": 0xC09E90, "rs": 0xBF61D0}  # ô TypeInfo của class
+FLAGS = {"ts": ("rs", 0x10), "nhat": ("rs", 0x40), "ak": ("fg", 0x0), "ahs": ("fg", 0x20)}  # Tàn sát, Tự nhặt, Tự đánh, Tự hồi sinh
+CAVE, FPS_APPLY = 0x330CE0, 0x331180          # cave ngủ (bắt đầu bằng call FPS_APPLY) - xem patch_vqmm.py
+D_PICKED, D_FORCE, D_FPS_REQ = 0xEFBD20, 0xEFBD80, 0xEFBD84
+
+
+class GameMemory:
+    """Đọc/ghi bộ nhớ một tiến trình game"""
+
+    def __init__(self, pid):
+        self.h = kernel32.OpenProcess(0x0010 | 0x0020 | 0x0008 | 0x0400, False, pid)  # VM_READ/WRITE/OPERATION, QUERY_INFORMATION
+        if not self.h:
+            raise OSError(f"Không mở được tiến trình {pid} (thử chạy bảng bằng quyền Administrator)")
+        self.base = self.module_base("GameAssembly.dll")
+        if not self.base:
+            kernel32.CloseHandle(self.h)
+            raise OSError("Game chưa nạp xong GameAssembly.dll")
+        self.saved_fps = None
+
+    def module_base(self, name):
+        mods = (ctypes.c_void_p * 1024)()
+        needed = wintypes.DWORD()
+        if not kernel32.K32EnumProcessModulesEx(self.h, mods, ctypes.sizeof(mods), ctypes.byref(needed), 2):  # LIST_MODULES_64
+            return None
+        buf = ctypes.create_unicode_buffer(260)
+        for m in mods[: needed.value // ctypes.sizeof(ctypes.c_void_p)]:
+            if m and kernel32.K32GetModuleBaseNameW(self.h, m, buf, 260) and buf.value.lower() == name.lower():
+                return m
+        return None
+
+    def read(self, addr, size):
+        buf = ctypes.create_string_buffer(size)
+        got = ctypes.c_size_t()
+        if not addr or not kernel32.ReadProcessMemory(self.h, ctypes.c_void_p(addr), buf, size, ctypes.byref(got)):
+            raise OSError("đọc bộ nhớ lỗi")
+        return buf.raw
+
+    def write(self, addr, data):
+        if not kernel32.WriteProcessMemory(self.h, ctypes.c_void_p(addr), data, len(data), None):
+            raise OSError("ghi bộ nhớ lỗi")
+
+    def num(self, addr, fmt):
+        return struct.unpack(fmt, self.read(addr, struct.calcsize(fmt)))[0]
+
+    def ptr(self, addr):
+        return self.num(addr, "<Q")
+
+    def string(self, addr):
+        p = self.ptr(addr)
+        if not p:
+            return ""
+        n = self.num(p + 0x10, "<i")
+        return self.read(p + 0x14, n * 2).decode("utf-16-le", "replace") if 0 < n < 200 else ""
+
+    def statics(self, cls):
+        klass = self.ptr(self.base + SLOT[cls])
+        return self.ptr(klass + 0xB8) if klass else 0  # 0 khi class chưa khởi tạo
+
+    def can_hide(self):
+        return self.read(self.base + CAVE, 1) == b"\xe8" and self.read(self.base + FPS_APPLY, 2) == b"\x8b\x05"
+
+    def status(self):
+        s = {"ready": False, "canHide": self.can_hide(), "flags": {}}
+        if s["canHide"]:
+            s["hidden"] = self.read(self.base + D_FORCE, 1) != b"\0"
+            s["picked"] = self.num(self.base + D_PICKED, "<Q")
+        ft = self.statics("ft")
+        s["fps"] = self.num(ft + 0x1A, "<h") if ft else 0
+        for key, (cls, off) in FLAGS.items():
+            st = self.statics(cls)
+            s["flags"][key] = bool(self.read(st + off, 1)[0]) if st else None
+        bh, jb = self.statics("bh"), self.statics("jb")
+        me = self.ptr(bh + 0xA8) if bh else 0
+        if not me or not jb:
+            return s  # màn hình đăng nhập / đang tải
+        name = self.string(me + 0x190)
+        if not name:
+            return s
+        s.update(ready=True, name=name, hp=self.num(me + 0xD0, "<q"), hpFull=self.num(me + 0x108, "<q"),
+                 mp=self.num(me + 0xC8, "<q"), mpFull=self.num(me + 0x110, "<q"), dead=self.num(me + 0x88, "<i") == 14,
+                 map=self.string(jb + 0x70), zone=self.num(jb + 0x84, "<i"))
+        return s
+
+    def set_flag(self, key, on):
+        cls, off = FLAGS[key]
+        st = self.statics(cls)
+        if st:
+            self.write(st + off, b"\x01" if on else b"\x00")
+
+    def set_fps(self, fps):
+        ft = self.statics("ft")
+        if ft:
+            self.write(ft + 0x1A, struct.pack("<h", fps))  # số FPS MOD hiển thị
+        self.write(self.base + D_FPS_REQ, struct.pack("<i", fps))  # cave gọi set_targetFrameRate ở lần vẽ tới
+
+    def set_hidden(self, on, fps):
+        """Ẩn: ép ngủ (không vẽ gì) + hạ FPS; hiện: thôi ép ngủ + trả FPS cũ"""
+        hidden = self.read(self.base + D_FORCE, 1) != b"\0"
+        if on:
+            if not hidden:
+                ft = self.statics("ft")
+                self.saved_fps = self.num(ft + 0x1A, "<h") if ft else 60
+            self.write(self.base + D_FORCE, b"\x01")
+            self.set_fps(fps)
+        elif hidden:
+            self.write(self.base + D_FORCE, b"\x00")
+            self.set_fps(self.saved_fps if self.saved_fps and self.saved_fps > 5 else 60)
+
+    def close(self):
+        kernel32.CloseHandle(self.h)
+
+
+class Game:
+    """Một tiến trình game đang theo dõi"""
+
+    def __init__(self, pid, mem, exe):
+        self.pid, self.mem, self.exe = pid, mem, exe
         self.hwnd = None
         self.hidden = False
+        self.saved_win = None  # (x, y, exstyle) trước khi ẩn
         self.status = {}
         self.cpu_prev = None
         self.cpu_pct = 0.0
@@ -149,12 +308,9 @@ class PanelApp:
         self.games = {}  # pid -> Game
         self.lock = threading.Lock()
         self.events = queue.Queue()
-        self.device = frida.get_local_device()
-        self.agent_src = open(AGENT_PATH, encoding="utf-8").read()
         self.sys_prev = system_times()
         self.last_relaunch = 0.0
         self.stop = False
-        self.rpc_pool = ThreadPoolExecutor(max_workers=4)
 
         root.title("Bảng điều khiển treo game - NgocRongViet")
         root.geometry("1060x420")
@@ -190,7 +346,7 @@ class PanelApp:
         ttk.Label(bar2, text="   FPS khi ẩn:").pack(side="left")
         self.var_fps = tk.IntVar(value=self.cfg["hiddenFps"])
         ttk.Spinbox(bar2, from_=1, to=60, width=4, textvariable=self.var_fps, command=self.save_opts).pack(side="left")
-        ttk.Label(bar2, text="(thấp = nhẹ máy nhưng đánh chậm; 10 là vừa)").pack(side="left", padx=4)
+        ttk.Label(bar2, text="(20 = đánh đủ nhanh mà nhẹ; 10 = nhẹ hơn nhưng đánh chậm một nửa)").pack(side="left", padx=4)
         self.var_watch = tk.BooleanVar(value=self.cfg["watchdog"])
         ttk.Checkbutton(bar2, text="Tự mở lại game bị thoát", variable=self.var_watch, command=self.save_opts).pack(side="right")
 
@@ -198,15 +354,7 @@ class PanelApp:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(500, self.refresh_ui)
 
-    # ---------- luồng nền: gắn game mới, đọc trạng thái ----------
-    def attach(self, pid, exe):
-        session = self.device.attach(pid)
-        script = session.create_script(self.agent_src)
-        script.load()
-        game = Game(pid, session, script, exe)
-        session.on("detached", lambda reason, *_: self.events.put(("detached", pid)))
-        return game
-
+    # ---------- luồng nền: nhận game mới, đọc trạng thái ----------
     def poll_loop(self):
         while not self.stop:
             try:
@@ -216,14 +364,16 @@ class PanelApp:
             time.sleep(1)
 
     def poll_once(self):
-        procs = {p.pid: p for p in self.device.enumerate_processes() if p.name.lower() == PROCESS_NAME.lower()}
-        for pid in procs:
+        pids = list_game_pids()
+        for pid in list(self.games):
+            if pid not in pids:
+                self.events.put(("exited", pid))
+        for pid in pids:
             if pid not in self.games:
                 try:
-                    game = self.attach(pid, self.exe_of(pid))
-                except Exception as e:
-                    self.events.put(("error", f"Không gắn được PID {pid}: {e}"))
-                    continue
+                    game = Game(pid, GameMemory(pid), self.exe_of(pid))
+                except OSError:
+                    continue  # game vừa mở, chưa nạp xong -> thử lại lần sau
                 with self.lock:
                     self.games[pid] = game
         wins = game_windows()
@@ -245,10 +395,9 @@ class PanelApp:
                     g.cpu_pct = (cpu - g.cpu_prev[0]) / 1e7 / (now - g.cpu_prev[1]) / ncpu * 100
                 g.cpu_prev = (cpu, now)
             try:
-                # game thoát giữa chừng có thể làm lời gọi treo -> giới hạn 3s để luồng nền không kẹt
-                g.status = self.rpc_pool.submit(g.script.exports_sync.status).result(timeout=3)
-            except Exception:
-                pass  # game đang thoát; sự kiện detached sẽ dọn
+                g.status = g.mem.status()
+            except OSError:
+                pass  # đang đổi màn hình / game đang thoát
         self.events.put(("machine", machine_cpu, *memory_status()))
 
     @staticmethod
@@ -270,7 +419,7 @@ class PanelApp:
             if ev[0] == "machine":
                 _, cpu, used, total = ev
                 self.lbl_machine.config(text=f"Máy: CPU {cpu:.0f}%  |  RAM {used:.0f}/{total:.0f} MB  |  {len(self.games)} game")
-            elif ev[0] == "detached":
+            elif ev[0] == "exited":
                 self.on_game_exit(ev[1])
             elif ev[0] == "error":
                 print("[LỖI]", ev[1])
@@ -291,7 +440,7 @@ class PanelApp:
             hp = f'{s["hp"]:,}/{s["hpFull"]:,}'
             mp = f'{s["mp"]:,}/{s["mpFull"]:,}'
         else:
-            name, where, hp, mp = ("Lỗi agent" if s.get("error") else "Đang đăng nhập..."), "", "", ""
+            name, where, hp, mp = "Đang đăng nhập...", "", "", ""
         flags = ", ".join(label for key, label in FLAG_NAMES if (s.get("flags") or {}).get(key))
         picked = "" if s.get("picked") is None else s["picked"]
         view = "Ẩn" if g.hidden else "Hiện"
@@ -304,9 +453,6 @@ class PanelApp:
     def selected(self):
         return [int(i) for i in self.tree.selection()]
 
-    def run_bg(self, fn):
-        threading.Thread(target=fn, daemon=True).start()
-
     def set_hidden(self, pids, hide):
         if not pids:
             return
@@ -315,13 +461,19 @@ class PanelApp:
             g = self.games.get(pid)
             if not g:
                 continue
-            if hide and not (g.status or {}).get("canHide", True):
+            if hide and not g.mem.can_hide():
                 messagebox.showwarning("Ẩn game", "GameAssembly.dll chưa vá bản mới (chạy patch_vqmm.bat rồi mở lại game).")
                 return
-            if g.hwnd:
-                user32.ShowWindow(g.hwnd, 0 if hide else 5)  # SW_HIDE / SW_SHOW
+            if g.hwnd and hide and not g.hidden:
+                g.saved_win = hide_window(g.hwnd)
+            elif g.hwnd and not hide and g.saved_win:
+                show_window(g.hwnd, g.saved_win)
+                g.saved_win = None
             g.hidden = hide
-            self.run_bg(lambda g=g: g.script.exports_sync.set_hidden(hide, fps))
+            try:
+                g.mem.set_hidden(hide, fps)
+            except OSError:
+                pass  # game vừa thoát
 
     def toggle_flag(self, key):
         pids = self.selected()
@@ -331,7 +483,10 @@ class PanelApp:
         for pid in pids:
             g = self.games.get(pid)
             if g:
-                self.run_bg(lambda g=g: g.script.exports_sync.set_flag(key, not first))
+                try:
+                    g.mem.set_flag(key, not first)
+                except OSError:
+                    pass
 
     def kill_selected(self):
         pids = self.selected()
@@ -346,6 +501,8 @@ class PanelApp:
     def on_game_exit(self, pid):
         with self.lock:
             g = self.games.pop(pid, None)
+        if g:
+            g.mem.close()
         if g and not g.closing and self.var_watch.get() and g.exe and time.monotonic() - self.last_relaunch > 30:
             self.last_relaunch = time.monotonic()  # chặn mở dồn khi game văng liên tục
             print(f"[MỞ LẠI] Game PID {pid} đã thoát, đang mở lại")
@@ -377,17 +534,12 @@ class PanelApp:
         self.stop = True
         for g in list(self.games.values()):
             if g.hidden:
-                if g.hwnd:
-                    user32.ShowWindow(g.hwnd, 5)
+                if g.hwnd and g.saved_win:
+                    show_window(g.hwnd, g.saved_win)
                 try:
-                    g.script.exports_sync.set_hidden(False, 0)
-                    time.sleep(0.3)  # chờ FixedUpdate chạy lệnh trước khi tách agent
-                except Exception:
+                    g.mem.set_hidden(False, 0)
+                except OSError:
                     pass
-            try:
-                g.session.detach()
-            except Exception:
-                pass
         self.root.destroy()
 
 
