@@ -4,3 +4,4 @@ __pycache__/
 .deps/
 boss_seen.txt
 GameAssembly.dll.old*
+panel_config.json
