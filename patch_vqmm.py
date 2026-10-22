@@ -290,18 +290,21 @@ def patch_dll(dll_path=None):
                 "0f8488470000488b48304885c90f847b47000033d2e866f2f8ff33c9e82f95f8ff4885c00f84644700004c3970400f84"
                 "b4000000488b05e5938d004439b0e0000000750f488bc8e81443d6ff488b05cd938d00488b80b8000000488b48304885"
                 "c90f84274700008379180d0f86174700004438712d753733c9e8d294f8ff4885c00f8407470000488b0d129a8d00488b"
-                "58404439b1e00000007505e8c042d6ff"
+                "58404439b1e00000007505e8c042d6ff33d2488bcbe8d6e70c0084c0743a33c9e89b94f8ff4885c00f84d04600004c39"
+                "7040742433c9e88594f8ff4885c00f84ba460000488b48404885c90f84ad46000033d2e898f1f8ff33c9e86194f8ff48"
+                "85c00f84964600004c3970480f848d060000488b0517938d004439b0e00000"
             ),
             # FPS MOD <= 5 và không có menu / panel / ô nhập (ChatTextField) đang mở -> nền đen + bảng thông tin MOD
             # + 2 dòng "CPU máy: x%" (GetSystemTimes, toàn máy) và "Đã nhặt: N món"; ngược lại -> GameCanvas.paint như thường.
             # 0x330CE0 cave ngủ, 0x330E00 vẽ CPU/số món, 0x331100 bộ đếm nhặt đồ; biến lưu ở phần thừa .data 0xEFBD00
+            # 0x331120: vẫn chạy hoạt ảnh chiêu của mình (bh.bdd/bh.bbl) - game chỉ gửi gói đánh khi hoạt ảnh chạy hết, thiếu nó là không đánh
             bytes.fromhex(
                 "488b0569898d00488b80b80000000fbf401a83f8050f8f95f61c00488b05d6828d00488b80b80000004c8b88d0000000"
                 "4d85c9740b41807910000f8570f61c004c8b88d80000004d85c9740b41807910000f8559f61c004c8b88e00000004d85"
                 "c9740b41807910000f8542f61c00488b05a37e8d00a80175234885c0741e488b80b80000004885c07412488b004885c0"
-                "740a807818000f8514f61c00534883ec304889d34889d931d24531c0e8ff2f05004889d931d24531c041b9b80b0000c7"
-                "442420b80b000048c744242800000000e86b211f004889d931d2e8917c2000e83c0000004883c4305bc3cccccccccccc"
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                "740a807818000f8514f61c00534883ec304889d34889d9e8940300004889d931d24531c0e8f72f05004889d931d24531"
+                "c041b9b80b0000c7442420b80b000048c744242800000000e863211f004889d931d2e8897c2000e8340000004883c430"
+                "5bc3cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                 "4154415556574883ec484c8d25efaebc00498d4c2428498d5424304d8d442438ff15f2726800498b442430492b442408"
                 "498b4c2438492b4c24104801c8483d404b4c00724d498b4c2428492b0c244989c04929c873034531c04989c1496bc064"
                 "31d249f7f14883f8647605b8640000004989442418498b44242849890424498b4424304989442408498b442438498944"
@@ -318,7 +321,9 @@ def patch_dll(dll_path=None):
                 "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                 "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                 "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                "f048ff0518acbc00488b0dc97e8d00c3"
+                "f048ff0518acbc00488b0dc97e8d00c3cccccccccccccccccccccccccccccccc53564883ec284889ce31c9e8b0eee6ff"
+                "4885c074434889c34883bbe80400000074364889d931d2e854c8e5ff4885c074278b8b900400003b48187d1c4889d948"
+                "89f24531c0e85642e6ff4889d94889f24531c0e848a5e5ff4883c4285e5bc3"
             ),
         ),
         (

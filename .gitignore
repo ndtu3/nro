@@ -3,3 +3,4 @@ __pycache__/
 *.bak
 .deps/
 boss_seen.txt
+GameAssembly.dll.old*
