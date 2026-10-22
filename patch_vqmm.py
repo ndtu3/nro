@@ -263,7 +263,7 @@ def patch_dll(dll_path=None):
         ),
         # 8. Chế độ ngủ cho VPS yếu: nhập FPS (menu MOD "Nhập FPS") từ 1 đến 5 thì game không vẽ hình nữa,
         # chỉ còn nền đen + bảng thông tin MOD (HP, MP, map - khu, vàng/ngọc, thông báo boss); logic vẫn chạy.
-        # FPS được MOD lưu lại nên mở lại game vẫn ngủ. Đang ngủ bấm X mở menu MOD là hiện lại, nhập FPS >= 6 để thôi ngủ.
+        # Mở lại game thì không ngủ (phải nhập lại FPS 5). Đang ngủ bấm X mở menu MOD là hiện lại, nhập FPS >= 6 để thôi ngủ.
         (
             "SleepMode_Cave",
             0x330CE0,
@@ -272,17 +272,60 @@ def patch_dll(dll_path=None):
                 "638c00e80844d6ff488d0d01648c00e8fc43d6ff488d0db5648c00e8f043d6ff488d0da9638c00e8e443d6ff488d0d3d"
                 "648c00e8d843d6ff488d0dd1648c00e8cc43d6ff488d0df5928d00e8c043d6ff488d0d09938d00e8b443d6ff488d0d1d"
                 "948d00e8a843d6ff488d0d11978d00e89c43d6ff488d0d85978d00e89043d6ff488d0dd9988d00e88443d6ff488d0dad"
-                "9c8d00e87843d6ff488d0d619d8d00e86c43d6ff488d0d559e8d00e86043d6ff488d0de9a0"
+                "9c8d00e87843d6ff488d0d619d8d00e86c43d6ff488d0d559e8d00e86043d6ff488d0de9a08d00e85443d6ff488d0d5d"
+                "a48d00e84843d6ffc605c611920001488b05aa938d004533f6664489b424880000004439b0e0000000750f488bc8e8cd"
+                "45d6ff488b0586938d00488b80b80000004438700d0f85fe0b0000488b0d2e928d004439b1e00000007505e8a045d6ff"
+                "48895c247033c948896c245048897c24484c896424404c896c24384c897c2430e82b55f4ff4885c00f84a04900004438"
+                "70320f85930b0000488b0de1918d004439b1e00000007505e85345d6ff33c9e8fc54f4ff4885c00f84714900004438b0"
+                "ca0600000f85610b0000488b05cf978d00488b88b80000004438711c0f85490b0000488b05d7958d004439b0e0000000"
+                "750f488bc8e80645d6ff488b05bf958d00488b80b800000044387015745c33c9e8db96f8ff4885c00f84104900004438"
+                "70187546488b0595958d004439b0e0000000750f488bc8e8c444d6ff488b057d958d00488b80b8000000488b88d00000"
+                "004885c90f84d448000044387110750a33d2488bcee8f6ed010033d2488bcee8bca50100488b0d45958d004439b1e000"
+                "00007505e87744d6ff488b0de0618c004533c033d2e87668e5ff488b0dff908d004439b1e0000000750ce85144d6ff48"
+                "8b0dea908d00488b81b8000000bd1900000041bf050000004c3970100f85d706000033c9e81796f8ff4885c00f844c48"
+                "0000443870180f84a102000033c9e8fd95f8ff4885c00f84324800004c3970300f84b4000000488b05b3948d004439b0"
+                "e0000000750f488bc8e8e243d6ff488b059b948d00488b80b8000000488b48304885c90f84f54700008379180c0f86e5"
+                "4700004438712c753733c9e8a095f8ff4885c00f84d5470000488b0de09a8d00488b58304439b1e00000007505e88e43"
+                "d6ff33d2488bcbe8a4e80c0084c0743a33c9e86995f8ff4885c00f849e4700004c397030742433c9e85395f8ff4885c0"
+                "0f8488470000488b48304885c90f847b47000033d2e866f2f8ff33c9e82f95f8ff4885c00f84644700004c3970400f84"
+                "b4000000488b05e5938d004439b0e0000000750f488bc8e81443d6ff488b05cd938d00488b80b8000000488b48304885"
+                "c90f84274700008379180d0f86174700004438712d753733c9e8d294f8ff4885c00f8407470000488b0d129a8d00488b"
+                "58404439b1e00000007505e8c042d6ff"
             ),
-            # FPS MOD <= 5 và không có menu / panel / ô nhập (ChatTextField) đang mở -> nền đen + bảng thông tin MOD;
-            # ngược lại (hoặc bấm X mở menu MOD) -> GameCanvas.paint như thường
+            # FPS MOD <= 5 và không có menu / panel / ô nhập (ChatTextField) đang mở -> nền đen + bảng thông tin MOD
+            # + 2 dòng "CPU máy: x%" (GetSystemTimes, toàn máy) và "Đã nhặt: N món"; ngược lại -> GameCanvas.paint như thường.
+            # 0x330CE0 cave ngủ, 0x330E00 vẽ CPU/số món, 0x331100 bộ đếm nhặt đồ; biến lưu ở phần thừa .data 0xEFBD00
             bytes.fromhex(
                 "488b0569898d00488b80b80000000fbf401a83f8050f8f95f61c00488b05d6828d00488b80b80000004c8b88d0000000"
                 "4d85c9740b41807910000f8570f61c004c8b88d80000004d85c9740b41807910000f8559f61c004c8b88e00000004d85"
                 "c9740b41807910000f8542f61c00488b05a37e8d00a80175234885c0741e488b80b80000004885c07412488b004885c0"
                 "740a807818000f8514f61c00534883ec304889d34889d931d24531c0e8ff2f05004889d931d24531c041b9b80b0000c7"
-                "442420b80b000048c744242800000000e86b211f004889d931d2e8917c20004883c4305bc3"
+                "442420b80b000048c744242800000000e86b211f004889d931d2e8917c2000e83c0000004883c4305bc3cccccccccccc"
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                "4154415556574883ec484c8d25efaebc00498d4c2428498d5424304d8d442438ff15f2726800498b442430492b442408"
+                "498b4c2438492b4c24104801c8483d404b4c00724d498b4c2428492b0c244989c04929c873034531c04989c1496bc064"
+                "31d249f7f14883f8647605b8640000004989442418498b44242849890424498b4424304989442408498b442438498944"
+                "2410498d7c2440c6074348ffc7c6075048ffc7c6075548ffc7c6072048ffc7c6076d48ffc7c607c348ffc7c607a148ff"
+                "c7c6077948ffc7c6073a48ffc7c6072048ffc7498b442418488d74244741bd0a00000031d249f7f580c230881648ffce"
+                "4885c075ee48ffc6488d4c24474839ce77098a06880748ffc7ebeac6072548ffc7c6070048ffc7498d4c2440e80f9bdd"
+                "ff4989c0488b0525858d00488b80b8000000488b88e00000008b500489542428c74424208800000048c7442430000000"
+                "004885c9740e4889da41b904000000e8bcf91e00498d7c2440c607c448ffc7c6079048ffc7c607c348ffc7c607a348ff"
+                "c7c6072048ffc7c6076e48ffc7c6076848ffc7c607e148ffc7c607ba48ffc7c607b748ffc7c6077448ffc7c6073a48ff"
+                "c7c6072048ffc7498b442420488d74244741bd0a00000031d249f7f580c230881648ffce4885c075ee48ffc6488d4c24"
+                "474839ce77098a06880748ffc7ebeac6072048ffc7c6076d48ffc7c607c348ffc7c607b348ffc7c6076e48ffc7c60700"
+                "48ffc7498d4c2440e8139addff4989c0488b0529848d00488b80b8000000488b88e00000008b500489542428c7442420"
+                "9400000048c7442430000000004885c9740e4889da41b904000000e8c0f81e004883c4485f5e415d415cc3cccccccccc"
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                "f048ff0518acbc00488b0dc97e8d00c3"
             ),
+        ),
+        (
+            "SleepMode_PickupCounter_Hook",
+            0x321EA7,  # đầu xử lý gói -20 (mình nhặt được đồ)
+            bytes.fromhex("488b0d2a718e00"),  # mov rcx, [TypeInfo dd]
+            bytes.fromhex("e854f200009090"),  # call bộ đếm (đếm + chạy lại lệnh gốc)
         ),
         (
             "SleepMode_OnGUI_Hook",
@@ -290,9 +333,8 @@ def patch_dll(dll_path=None):
             bytes.fromhex("e8 ab 73 ff ff"),  # call GameCanvas.paint
             bytes.fromhex("e8 fb 7c e2 ff"),  # call SleepMode_Cave
         ),
-        # MOD chỉ nhận FPS 30..240 -> cho phép 1..240 (lúc nạp cài đặt và lúc nhập FPS)
-        ("FPS_Range_Load_Max", 0x53FDC0, bytes.fromhex("b9 d2 00 00 00"), bytes.fromhex("b9 ef 00 00 00")),
-        ("FPS_Range_Load_Min", 0x53FDC5, bytes.fromhex("8d 47 e2"), bytes.fromhex("8d 47 ff")),
+        # MOD chỉ nhận FPS 30..240 -> cho phép nhập 1..240. Lúc nạp cài đặt vẫn giữ 30..240:
+        # FPS ngủ (<= 5) đã lưu bị bỏ qua -> mở game luôn hiện hình, muốn ngủ thì nhập lại FPS 5.
         ("FPS_Range_Input_Max", 0x5410A8, bytes.fromhex("b9 d2 00 00 00"), bytes.fromhex("b9 ef 00 00 00")),
         ("FPS_Range_Input_Min", 0x5410AD, bytes.fromhex("8d 43 e2"), bytes.fromhex("8d 43 ff")),
     ]
