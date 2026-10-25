@@ -11,6 +11,11 @@
   "autoRevive": true,
   "reviveMaxPerTarget": 0,
   "reviveDelayMs": 3000,
+  "reviveRetryMs": 6000,
+  "reviveAttemptsPerDeath": 3,
+  "lootMaxMs": 12000,
+  "xmapRetryMs": 90000,
+  "badMapMs": 600000,
   "useBuffSkills": true,
   "buffSkills": [
     6,
@@ -20,7 +25,7 @@
   "clusters": [
     {
       "name": "Tiểu Đội Sát Thủ (Nappa)",
-      "enabled": false,
+      "enabled": true,
       "maps": [
         "63-83"
       ],
@@ -34,7 +39,7 @@
     },
     {
       "name": "Tiểu Đội Sát Thủ (Namếc)",
-      "enabled": true,
+      "enabled": false,
       "excludeMaps": [
         "63-83"
       ],
@@ -47,10 +52,16 @@
       ]
     },
     {
-      "name": "Fide Đại Ca",
-      "enabled": false,
+      "name": "Fide Đại Ca (Núi Khỉ Vàng)",
+      "enabled": true,
       "members": [
+        "Fide đại ca 1",
+        "Fide đại ca 2",
+        "Fide đại ca 3",
         "Fide Đại Ca *"
+      ],
+      "maps": [
+        80
       ]
     },
     {

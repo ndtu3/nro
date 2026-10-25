@@ -1,6 +1,103 @@
 import os
 import shutil
+import struct
 import sys
+
+
+def get_vqmm_v2_patches():
+    """Bản vá VQMM v2 chống bấm nhầm 'Đến Kaio' tuyệt đối ở cả bước 1 và bước 2."""
+    cave1 = (
+        bytes([64, 182, 255])
+        + bytes([64, 136, 116, 36, 72])
+        + bytes([72, 139, 5]) + struct.pack("<i", 0xC08FD8 - 0x330C7F)
+        + bytes([72, 139, 128, 184, 0, 0, 0])
+        + bytes([72, 139, 128, 208, 0, 0, 0])
+        + bytes([72, 133, 192])
+        + bytes([15, 132]) + struct.pack("<i", 0x530D79 - 0x330C96)
+        + bytes([128, 120, 16, 0])
+        + bytes([15, 132]) + struct.pack("<i", 0x530D79 - 0x330CA0)
+        + bytes([233]) + struct.pack("<i", 0x530B67 - 0x330CA5)
+    )
+    cave_match = (
+        bytes([64, 136, 124, 36, 72])
+        + bytes([72, 139, 5]) + struct.pack("<i", 0xC09530 - 0x330CB1)
+        + bytes([72, 139, 128, 184, 0, 0, 0])
+        + bytes([128, 120, 74, 0])
+        + bytes([15, 132]) + struct.pack("<i", 0x530D79 - 0x330CC2)
+        + bytes([233]) + struct.pack("<i", 0x530D61 - 0x330CC7)
+    )
+    cave2 = (
+        bytes([72, 137, 203])
+        + bytes([72, 131, 236, 40])
+        + bytes([232]) + struct.pack("<i", 0x530AE0 - 0x330CD3)
+        + bytes([72, 131, 196, 40])
+        + bytes([15, 182, 192])
+        + bytes([137, 67, 32])
+        + bytes([195, 204, 204])
+    )
+    orig_cave = bytes([
+        64, 86, 65, 86, 72, 131, 236, 88, 128, 61, 38, 19, 146, 0, 0, 72, 139, 241, 15, 133, 87, 1, 0, 0,
+        72, 141, 13, 73, 29, 141, 0, 232, 140, 68, 214, 255, 72, 141, 13, 165, 70, 141, 0, 232, 128, 68, 214, 255,
+        72, 141, 13, 129, 106, 141, 0, 232, 116, 68, 214, 255, 72, 141, 13, 205, 99, 140, 0, 232, 104, 68, 214, 255,
+        72, 141, 13, 209, 246, 140, 0, 232, 92, 68, 214, 255, 72, 141, 13, 117, 100, 140, 0, 232, 80, 68, 214, 255,
+        72, 141, 13, 41, 101, 140, 0, 232,
+    ])
+    v1_cave = (
+        cave1
+        + bytes([204] * 27)
+        + bytes([49, 192, 186, 255, 0, 0, 0, 128, 121, 16, 0, 15, 68, 194, 137, 65, 32, 195])
+        + bytes([204] * 6)
+        + bytes([68, 68, 214, 255, 72, 141, 13, 109])
+    )
+    v1_cave_alt = cave1 + bytes([204] * 27) + bytes([49, 192, 186, 255, 0, 0, 0, 128, 121, 16, 0, 15, 68, 194, 137, 65, 32, 195]) + bytes([204] * 14)
+
+    return [
+        (
+            "Tab2_FindMenu_RuongPhu",
+            0x530D6D,
+            (bytes([64, 136, 124, 36, 72, 235, 5]), bytes([64, 136, 124, 36, 72, 235, 237])),
+            bytes([233]) + struct.pack("<i", 0x330CA5 - 0x530D72) + bytes([144, 144]),
+        ),
+        (
+            "VQMM_Cave_SafeMenuIndex",
+            0x330C70,
+            (orig_cave, v1_cave, v1_cave_alt),
+            cave1 + cave_match + cave2,
+        ),
+        (
+            "VQMM_Step2_NoBlindClick",
+            0x5311D3,
+            (bytes([199, 65, 32, 0, 0, 0, 0]), bytes([232, 232, 250, 223, 255, 144, 144])),
+            bytes([232]) + struct.pack("<i", 0x330CC7 - 0x5311D8) + bytes([144, 144]),
+        ),
+        (
+            "VQMM_Fix_MoVongQuay_Step2",
+            0x53122B,
+            (
+                bytes([
+                    131, 184, 224, 0, 0, 0, 0, 117, 15, 72, 139, 200, 232, 148, 65, 182, 255,
+                    72, 139, 5, 237, 130, 109, 0, 72, 139, 128, 184, 0, 0, 0,
+                    199, 64, 88, 255, 255, 255, 255, 233, 6, 1, 0, 0,
+                ]),
+                (
+                    bytes([72, 139, 128, 184, 0, 0, 0])
+                    + bytes([131, 123, 32, 1])
+                    + bytes([116, 7])
+                    + bytes([199, 64, 88, 255, 255, 255, 255])
+                    + bytes([233]) + struct.pack("<i", 0x5313EF - 0x531244)
+                    + bytes([144] * 18)
+                ),
+            ),
+            (
+                bytes([72, 139, 128, 184, 0, 0, 0])
+                + bytes([131, 123, 32, 0])
+                + bytes([116, 7])
+                + bytes([199, 64, 88, 0, 0, 0, 0])
+                + bytes([233]) + struct.pack("<i", 0x5313EF - 0x531244)
+                + bytes([144] * 18)
+            ),
+        ),
+    ]
 
 if sys.stdout:  # bản .exe không cửa sổ console thì không có stdout
     sys.stdout.reconfigure(encoding="utf-8")
@@ -360,6 +457,9 @@ def patch_dll(dll_path=None):
         ("FPS_Range_Input_Min", 0x5410AD, bytes.fromhex("8d 43 e2"), bytes.fromhex("8d 43 ff")),
     ]
 
+    v2_map = {p[0]: p for p in get_vqmm_v2_patches()}
+    patches = [v2_map.get(p[0], p) for p in patches] + [v2_map["VQMM_Fix_MoVongQuay_Step2"]]
+
     source_path = bak_path if os.path.exists(bak_path) else dll_path
     with open(source_path, "rb") as f:
         data = bytearray(f.read())
@@ -367,20 +467,21 @@ def patch_dll(dll_path=None):
     # Tạo bản sao lưu .bak nếu chưa có và file gốc chưa bị vá
     if not os.path.exists(bak_path):
         first_foff = rva_to_foff(patches[0][1])
-        if bytes(data[first_foff : first_foff + len(patches[0][2])]) == patches[0][2]:
+        first_exp = patches[0][2][0] if isinstance(patches[0][2], tuple) else patches[0][2]
+        if bytes(data[first_foff : first_foff + len(first_exp)]) == first_exp:
             shutil.copy2(dll_path, bak_path)
             print(f"[BACKUP] Đã tạo bản sao lưu gốc tại: {bak_path}")
 
-    for name, rva, expected, replacement in patches:
+    for item in patches:
+        name, rva, expected, replacement = item[0], item[1], item[2], item[3]
+        valid_expected = expected if isinstance(expected, tuple) else (expected,)
         foff = rva_to_foff(rva)
-        actual = bytes(data[foff : foff + len(expected)])
+        actual = bytes(data[foff : foff + len(replacement)])
         if actual == replacement:
             print(f"[SKIP] {name} đã được vá sẵn.")
             continue
-        if actual != expected:
+        if actual not in valid_expected:
             raise RuntimeError(f"[{name}] Sai lệch dữ liệu tại RVA 0x{rva:X}")
-        if len(expected) != len(replacement):
-            raise RuntimeError(f"[{name}] Độ dài bản vá không khớp!")
         data[foff : foff + len(replacement)] = replacement
         print(f"[OK] Đã vá {name} ({len(replacement)} bytes)")
 

@@ -16,7 +16,11 @@ if not defined PY_EXE (
     )
 )
 if not defined PY_EXE (
-    echo [LOI] Khong tim thay Python tren may! Dung dist\ControlPanel.exe (khong can Python).
+    if exist "%~dp0ControlPanel.exe" (
+        start "" "%~dp0ControlPanel.exe"
+        exit /b 0
+    )
+    echo [LOI] Khong tim thay Python tren may! Hay dung ControlPanel.exe.
     pause
     exit /b 1
 )
