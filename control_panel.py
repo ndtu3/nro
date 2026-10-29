@@ -82,7 +82,7 @@ DEFAULT_BOSS_CFG = {
     "xmapRetryMs": 90000,
     "badMapMs": 600000,
     "useBuffSkills": True,
-    "buffSkills": [6, 12, 13],
+    "buffSkills": [6, 12, 13, "khiên năng lượng"],  # Thái dương hạ san, Đẻ trứng, Biến khỉ, Khiên
     "clusters": [
         {"name": "Tiểu Đội Sát Thủ (Nappa)", "enabled": False, "maps": ["63-83"], "members": ["Số 4", "Số 3", "Số 2", "Số 1", "Tiểu đội trưởng"]},
         {"name": "Tiểu Đội Sát Thủ (Namếc)", "enabled": True, "excludeMaps": ["63-83"], "members": ["Số 4", "Số 3", "Số 2", "Số 1", "Tiểu đội trưởng"]},
@@ -3180,7 +3180,7 @@ class BossHunter:
             return
         sks_len = self.mem.num(sks + 0x18, "<i")
         ki = self.mem.num(me + 0xC8, "<q")
-        buff_list = cfg.get("buffSkills", [6, 12, 13])
+        buff_list = cfg.get("buffSkills", DEFAULT_BOSS_CFG["buffSkills"])
 
         cur = self.mem.ptr(me + 0x230)
         if self.is_attack_skill(cur):
@@ -3193,11 +3193,13 @@ class BossHunter:
                 continue
             tid = self.mem.num(tpl + 0x10, "<b")
             name = self.mem.string(tpl + 0x18)
-            if tid not in buff_list:
+            # danh sách ghi được id (13) hoặc tên ("khiên năng lượng")
+            if not any(b == tid if isinstance(b, int) else norm_str(b) in norm_str(name) for b in buff_list):
                 continue
             last_use = self.mem.num(sk + 0x30, "<q")
             cooldown = self.mem.num(sk + 0x28, "<i")
-            if now - last_use < cooldown + 300:
+            # lần dùng cuối là giờ thật của game (ms từ 1970), không so với now (monotonic) được
+            if time.time() * 1000.0 - last_use < cooldown + 300:
                 continue
             mana = self.mem.num(sk + 0x44, "<i")
             need = self.mem.num(me + 0x110, "<q") * mana / 100 if self.mem.num(tpl + 0x24, "<i") == 1 else mana
