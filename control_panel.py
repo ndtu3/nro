@@ -279,6 +279,10 @@ def load_rms_accounts():
     return out
 
 
+LOGIN_LOCK = threading.Lock()
+BOSS_APPEAR_RE = re.compile(r"boss (.+?) vừa xuất hiện tại (.+?)(?: khu vực.*)?$")
+
+
 def save_rms_login(username, password):
     """Lưu tài khoản & mật khẩu vào Rms của game (acc, pass, accManager) để đăng nhập ngay"""
     username = (username or "").strip()
@@ -324,6 +328,11 @@ def load_config():
         "coffinQty": 100,
         "coffinDelayMs": 80,
         "autoCoffin": True,
+        "eggDelayMs": 120,
+        "eggAutoBuyStone": True,
+        "eggAutoBuyEgg": True,
+        "eggAutoUseEgg": True,
+        "eggTargetDays": 0,
     }
     if os.path.exists(CONFIG_PATH):
         try:
@@ -409,6 +418,9 @@ RVA_USE_SKILL_NOT_FOCUS = 0x4D5620
 RVA_SELECT_SKILL_SRV = 0x231C50
 RVA_PANEL_HIDE = 0x1EDFA0
 RVA_TELEPORT = 0x537F10
+RVA_REQUEST_CHANGE_MAP = 0x230B20  # hx.dql(): Service.requestChangeMap (gói -23) - xin qua cửa map đang đứng
+# map XMAP của MOD không biết đường: map đích -> (map kề XMAP tới được, cửa cần đi qua ở map kề)
+EXTRA_ROUTES = {170: (0, "giữa")}  # Đồng Bằng Aru: cửa giữa map Làng Aru (Làng Aru ở bên phải Nhà Gôhan)
 RVA_FOCUS_TO = 0x19AA70
 RVA_OPEN_NPC_MENU = 0x232340
 RVA_MENU_CLOSE = 0x50D360
@@ -425,6 +437,10 @@ ITEM_ID_COFFIN = 1116             # Hòm Halloween (Quan tài)
 ITEM_ID_CAPSULE_HALLOWEEN = 818   # Capsule Halloween (20 capsule = 1 Hòm Halloween)
 NPC_ID_SANTA = 39                 # NPC Santa
 SANTA_MAPS = (5, 13, 20)          # Đảo Kamê, Đảo Guru, Vách núi đen
+NPC_ID_KARIN = 18                 # Thần Mèo Karin (mua 99 Đá Linh Lực / Cửa hàng trứng)
+NPC_ID_EGG = 80                   # Trứng Linh Thú (ổ ấp trứng Linh Thú)
+ITEM_ID_DA_LINH_LUC = 700         # Đá Linh Lực (tid = 700)
+ITEM_ID_THOI_VANG = 457           # Thỏi vàng (tid = 457)
 
 
 def norm_str(s):
@@ -527,6 +543,9 @@ class GameMemory:
             kernel32.CloseHandle(self.h)
             raise OSError("Game chưa khởi tạo xong GameCanvas")
         self.saved_fps = None
+        self.panel_auto_ids = set()  # item bảng đã thêm vào Auto Item của MOD (chỉ được xoá những item này)
+        self.panel_auto_flag = False  # cờ tự dùng item do bảng bật (người chơi chưa bật trong game)
+        self.auto_item_tried = {}  # id -> lúc gọi fg.cnf gần nhất
         self.dropped_junk = 0
         self.call_lock = threading.Lock()
         self.apply_vqmm_v2_hotpatch()
@@ -668,6 +687,29 @@ class GameMemory:
         q.update(done=False, title=title, npc=npc, map=map_id, need=need)
         return q
 
+    def gadget_cmd(self, msgdlg):
+        """Command mượn làm "nút bấm" để chạy lệnh trên luồng chính: của hộp thoại -> GameScr -> màn hình chọn server.
+        Mất kết nối xong game chỉ còn màn hình chọn server (không hộp thoại, không GameScr) -> phải lấy nút của nó."""
+        cmd = self.ptr(msgdlg + 0x10)
+        if cmd:
+            return cmd
+        dg_st = self.statics("dg")
+        gscr = self.ptr(dg_st + 0x18) if dg_st else 0
+        cmd = self.ptr(gscr + 0x48) if gscr else 0
+        if not cmd:
+            dd_st = self.statics("dd")
+            srv = self.ptr(dd_st + 0x398) if dd_st else 0
+            cmd = self.ptr(srv + 0x40) if srv else 0  # hu.ong (Command)
+            arr = self.ptr(srv + 0x30) if (srv and not cmd) else 0  # hu.oml (Command[])
+            n = self.num(arr + 0x18, "<i") if arr else 0
+            for i in range(min(max(n, 0), 16)):
+                cmd = self.ptr(arr + 0x20 + 8 * i)
+                if cmd:
+                    break
+        if cmd:
+            self.write(msgdlg + 0x10, struct.pack("<Q", cmd))
+        return cmd
+
     def call_fn(self, fn_rva_or_va, rcx_arg=0, rdx_arg=0):
         """Gọi hàm fn(rcx, rdx) ngay trên luồng chính Unity qua Command+0x90 Action delegate gadget"""
         with self.call_lock:
@@ -678,14 +720,9 @@ class GameMemory:
             panel = self.ptr(dd_st + 0xD8)
             if not (msgdlg and panel):
                 return False
-            cmd = self.ptr(msgdlg + 0x10)
+            cmd = self.gadget_cmd(msgdlg)
             if not cmd:
-                dg_st = self.statics("dg")
-                gscr = self.ptr(dg_st + 0x18) if dg_st else 0
-                cmd = self.ptr(gscr + 0x48) if gscr else 0
-                if not cmd:
-                    return False
-                self.write(msgdlg + 0x10, struct.pack("<Q", cmd))
+                return False
 
             fn_va = fn_rva_or_va if fn_rva_or_va >= self.base else (self.base + fn_rva_or_va)
             buf_addr = self.base + D_ACTION_BUF
@@ -698,6 +735,7 @@ class GameMemory:
 
             old_dlg = self.ptr(dd_st + 0x100)
             old_id = self.num(cmd + 0x38, "<i")
+            old_listener = self.ptr(cmd + 0x30)
             self.write(cmd + 0x30, struct.pack("<Q", panel))
             self.write(cmd + 0x38, struct.pack("<i", 0))
             self.write(cmd + 0x90, struct.pack("<Q", buf_addr))
@@ -716,6 +754,7 @@ class GameMemory:
                 self.write(dd_st + 0x100, struct.pack("<Q", old_dlg if old_dlg != msgdlg else 0))
             self.write(cmd + 0x90, struct.pack("<Q", 0))
             self.write(cmd + 0x38, struct.pack("<i", old_id))
+            self.write(cmd + 0x30, struct.pack("<Q", old_listener))
             return ok
 
     def perform_action(self, listener, id_action, p_obj=0):
@@ -727,17 +766,13 @@ class GameMemory:
             msgdlg = self.ptr(dd_st + 0x108)
             if not msgdlg:
                 return False
-            cmd = self.ptr(msgdlg + 0x10)
+            cmd = self.gadget_cmd(msgdlg)
             if not cmd:
-                dg_st = self.statics("dg")
-                gscr = self.ptr(dg_st + 0x18) if dg_st else 0
-                cmd = self.ptr(gscr + 0x48) if gscr else 0
-                if not cmd:
-                    return False
-                self.write(msgdlg + 0x10, struct.pack("<Q", cmd))
+                return False
 
             old_dlg = self.ptr(dd_st + 0x100)
             old_id = self.num(cmd + 0x38, "<i")
+            old_listener = self.ptr(cmd + 0x30)
             old_p = self.ptr(cmd + 0x70)
             self.write(cmd + 0x90, struct.pack("<Q", 0))
             self.write(cmd + 0x30, struct.pack("<Q", listener))
@@ -755,6 +790,7 @@ class GameMemory:
                 time.sleep(0.01)
             self.write(main_st + 0x4C, struct.pack("<i", 0))
             self.write(cmd + 0x38, struct.pack("<i", old_id))
+            self.write(cmd + 0x30, struct.pack("<Q", old_listener))
             self.write(cmd + 0x70, struct.pack("<Q", old_p))
             if self.ptr(dd_st + 0x100) == msgdlg:
                 self.write(dd_st + 0x100, struct.pack("<Q", old_dlg if old_dlg != msgdlg else 0))
@@ -860,14 +896,9 @@ class GameMemory:
 
             body = self.ptr(me + 0x260)
             body_len = self.num(body + 0x18, "<i") if body else 10
-            cmd = self.ptr(msgdlg + 0x10)
+            cmd = self.gadget_cmd(msgdlg)
             if not cmd:
-                dg_st = self.statics("dg")
-                gscr = self.ptr(dg_st + 0x18) if dg_st else 0
-                cmd = self.ptr(gscr + 0x48) if gscr else 0
-                if not cmd:
-                    return False
-                self.write(msgdlg + 0x10, struct.pack("<Q", cmd))
+                return False
 
             old_page = self.num(panel + 0x238, "<i")
             old_sel = self.num(panel + 0x230, "<i")
@@ -974,24 +1005,39 @@ class GameMemory:
 
     def login_now(self, username=None, password=None):
         """Thực hiện đăng nhập ngay lập tức trên tiến trình game đang ở màn hình chờ / đăng nhập"""
+        with LOGIN_LOCK:  # Rms dùng chung: tab khác không được ghi đè acc/pass giữa lúc tab này đang nạp
+            return self._login_now(username, password)
+
+    def _login_now(self, username, password):
         if username:
             save_rms_login(username, password or "")
         dd_st = self.statics("dd")
         if not dd_st:
             return False
-        self.call_fn(RVA_LOAD_ACC_MGR, 0, 0)
         cur_scr = self.ptr(dd_st + 0xC8)
         srv_scr = self.ptr(dd_st + 0x398)
+        if srv_scr and cur_scr == srv_scr:
+            # mất kết nối xong game về màn hình chọn server: nút "Đăng nhập" (3) đọc acc/pass vừa ghi vào Rms
+            return self.perform_action(srv_scr, 3, 0)
+        self.call_fn(RVA_LOAD_ACC_MGR, 0, 0)
         login_scr = self.ptr(dd_st + 0xF0)
         if login_scr:
             self.call_fn(RVA_LOGIN_RELOAD_RMS, login_scr, 0)
-        if srv_scr and cur_scr == srv_scr:
-            return self.perform_action(srv_scr, 3, 0)
         if login_scr:
             return self.call_fn(RVA_LOGIN_DO_LOGIN, login_scr, 0)
         if srv_scr:
             return self.perform_action(srv_scr, 3, 0)
         return False
+
+    def login_cooldown(self):
+        """(ptr, giây) nếu hộp thoại đang báo "Bạn chỉ có thể đăng nhập lại sau N giây nữa", không thì None"""
+        dd_st = self.statics("dd")
+        msgdlg = self.ptr(dd_st + 0x108) if dd_st else 0
+        arr = self.ptr(msgdlg + 0x30) if msgdlg else 0
+        if not arr:
+            return None
+        hit = re.search(r"đăng nhập lại sau (\d+) giây", norm_str(" ".join(self.str_array(arr))))
+        return (arr, float(hit.group(1))) if hit else None
 
     def get_mod_auto_item_ids(self):
         """Đọc danh sách ID các vật phẩm đang nằm trong danh sách tự dùng (fg.mjr) của MOD"""
@@ -1008,27 +1054,27 @@ class GameMemory:
         raw = self.read(arr + 0x20, 8 * n)
         return [struct.unpack_from("<ii", raw, 8 * i)[1] for i in range(n)]
 
+    def _mod_auto_list(self, fg_st):
+        """(mjr, arr, [(iconID, id)]) của danh sách tự dùng item trong MOD"""
+        mjr = self.ptr(fg_st + 0x18)
+        n = self.num(mjr + 0x18, "<i") if mjr else 0
+        arr = self.ptr(mjr + 0x10) if mjr else 0
+        if not arr or not 0 < n <= 100:
+            return mjr, arr, []
+        raw = self.read(arr + 0x20, 8 * n)
+        return mjr, arr, [struct.unpack_from("<ii", raw, 8 * i) for i in range(n)]
+
     def sync_auto_items(self, enabled, target_ids, target_names):
-        """Đồng bộ danh sách tự dùng item (fg.mjr) của MOD theo cấu hình đã chọn trên bảng"""
+        """Đồng bộ danh sách tự dùng item (fg.mjr) của MOD theo item đã tích trên bảng.
+        Chỉ thêm/bớt item do chính bảng thêm vào - item và cờ tự dùng người chơi tự bật trong game giữ nguyên."""
         fg_st = self.statics("fg")
         if not fg_st:
             return 0
-        mjr = self.ptr(fg_st + 0x18)
-        if not enabled:
-            if self.read(fg_st + 0x11, 1) != b"\x00":
-                self.write(fg_st + 0x11, b"\x00")
-            if mjr and self.num(mjr + 0x18, "<i") > 0:
-                self.write(mjr + 0x18, struct.pack("<i", 0))
-            return 0
-        if self.read(fg_st + 0x11, 1) == b"\x00":
-            self.write(fg_st + 0x11, b"\x01")
         bh_st = self.statics("bh")
         me = self.ptr(bh_st + 0xA8) if bh_st else 0
-        bag = self.ptr(me + 0x250) if me else 0
-        if not bag:
-            return len(self.get_mod_auto_item_ids())
-        n_bag = self.num(bag + 0x18, "<i")
-        bag_matches = {}
+        bag = self.ptr(me + 0x250) if (me and enabled) else 0
+        n_bag = self.num(bag + 0x18, "<i") if bag else 0
+        bag_matches = {}  # item đã tích đang có trong hành trang: id -> Item*
         for idx in range(min(max(n_bag, 0), 200)):
             it = self.ptr(bag + 0x20 + 8 * idx)
             if not it:
@@ -1042,29 +1088,36 @@ class GameMemory:
             tname = norm_str(self.string(tpl + 0x18))
             if tid in target_ids or (tname and tname in target_names):
                 bag_matches[tid] = it
-        allowed_ids = set(target_ids) | set(bag_matches.keys())
-        kept_ids = set()
-        if mjr:
-            n_cur = self.num(mjr + 0x18, "<i")
-            arr = self.ptr(mjr + 0x10)
-            if arr and 0 < n_cur <= 100:
-                raw = self.read(arr + 0x20, 8 * n_cur)
-                kept_pairs = []
-                for i in range(n_cur):
-                    icon_id, item_id = struct.unpack_from("<ii", raw, 8 * i)
-                    if item_id in allowed_ids and item_id not in kept_ids:
-                        kept_pairs.append((icon_id, item_id))
-                        kept_ids.add(item_id)
-                if len(kept_pairs) != n_cur:
-                    new_raw = b"".join(struct.pack("<ii", ic, iid) for ic, iid in kept_pairs)
-                    if new_raw:
-                        self.write(arr + 0x20, new_raw)
-                    self.write(mjr + 0x18, struct.pack("<i", len(kept_pairs)))
+        mjr, arr, pairs = self._mod_auto_list(fg_st)
+        # bỏ item do bảng thêm mà giờ bị bỏ tích (hoặc tắt Tự dùng Item trên bảng); item người chơi tự thêm thì giữ
+        allowed = (set(target_ids) | set(bag_matches)) if enabled else set()
+        drop = {iid for _ic, iid in pairs if iid in self.panel_auto_ids and iid not in allowed}
+        if drop and mjr:
+            kept = [(ic, iid) for ic, iid in pairs if iid not in drop]
+            if kept:
+                self.write(arr + 0x20, b"".join(struct.pack("<ii", ic, iid) for ic, iid in kept))
+            self.write(mjr + 0x18, struct.pack("<i", len(kept)))
+            self.panel_auto_ids -= drop
+            pairs = kept
+        if not enabled:
+            if self.panel_auto_flag and not pairs:  # cờ do bảng bật mà danh sách đã rỗng -> trả lại như cũ
+                self.write(fg_st + 0x11, b"\x00")
+                self.panel_auto_flag = False
+            return len(pairs)
+        if self.read(fg_st + 0x11, 1) == b"\x00":
+            self.write(fg_st + 0x11, b"\x01")
+            self.panel_auto_flag = True
+        have = {iid for _ic, iid in pairs}
+        now = time.monotonic()
         for tid, it_ptr in bag_matches.items():
-            if tid not in kept_ids:
-                if self.call_fn(RVA_AUTO_ITEM_SET, it_ptr, 1):
-                    kept_ids.add(tid)
-        return len(kept_ids)
+            # fg.cnf(item) là BẬT/TẮT: có rồi mà gọi lại là bị xoá -> chỉ gọi khi chưa có, và không gọi lại trong 5s
+            if tid not in have and now - self.auto_item_tried.get(tid, 0) > 5:
+                self.auto_item_tried[tid] = now
+                self.call_fn(RVA_AUTO_ITEM_SET, it_ptr, 1)
+        _mjr, _arr, pairs = self._mod_auto_list(fg_st)
+        added = {iid for _ic, iid in pairs} & set(bag_matches)
+        self.panel_auto_ids |= added - have  # chỉ ghi nhận item do bảng thêm (không nhận item người chơi đã có)
+        return len(pairs)
 
     def patch_code_bytes(self, rva, new_bytes):
         """Ghi đè các byte mã máy tại RVA trong bộ nhớ GameAssembly.dll (dùng VirtualProtectEx)"""
@@ -1120,6 +1173,120 @@ class GameMemory:
                 q = self.num(it + 0x38, "<i")
                 total_qty += q if q > 0 else 1
         return total_qty, empty_slots
+
+    def find_egg_in_bag(self, me):
+        """Tìm vị trí quả trứng linh thú trong hành trang (me+0x250)"""
+        bag = self.ptr(me + 0x250) if me else 0
+        if not bag:
+            return -1, 0, ""
+        n = self.num(bag + 0x18, "<i")
+        for idx in range(min(max(n, 0), 200)):
+            it = self.ptr(bag + 0x20 + 8 * idx)
+            if not it:
+                continue
+            tpl = self.ptr(it + 0x18)
+            if not tpl:
+                continue
+            tid = self.num(tpl + 0x10, "<h")
+            name = norm_str(self.string(tpl + 0x18))
+            if ("trứng" in name or "trung" in name) and tid != ITEM_ID_DA_LINH_LUC:
+                return idx, tid, name
+        return -1, 0, ""
+
+    def find_egg_in_shop(self, me):
+        """Tìm quả trứng linh thú trong cửa hàng đang mở (me.arrItemShop tại me+0x270)"""
+        shop = self.ptr(me + 0x270) if me else 0
+        if not shop:
+            return 0, -1, ""
+        n_tabs = self.num(shop + 0x18, "<i")
+        for t_idx in range(min(max(n_tabs, 0), 12)):
+            tab = self.ptr(shop + 0x20 + 8 * t_idx)
+            if not tab:
+                continue
+            n_items = self.num(tab + 0x18, "<i")
+            for i_idx in range(min(max(n_items, 0), 100)):
+                it = self.ptr(tab + 0x20 + 8 * i_idx)
+                if not it:
+                    continue
+                tpl = self.ptr(it + 0x18)
+                if not tpl:
+                    continue
+                tid = self.num(tpl + 0x10, "<h")
+                name = norm_str(self.string(tpl + 0x18))
+                if "trứng" in name or "trung" in name:
+                    return it, tid, name
+        return 0, -1, ""
+
+    def use_bag_item(self, slot_idx):
+        """Sử dụng 1 món đồ tại ô slot_idx trong hành trang (gọi Action 2001 trên Panel)"""
+        with self.call_lock:
+            bh, dd_st, main_st = self.statics("bh"), self.statics("dd"), self.statics("Main")
+            if not (bh and dd_st and main_st):
+                return False
+            me = self.ptr(bh + 0xA8)
+            panel = self.ptr(dd_st + 0xD8)
+            msgdlg = self.ptr(dd_st + 0x108)
+            if not (me and panel and msgdlg):
+                return False
+            bag = self.ptr(me + 0x250)
+            it = self.ptr(bag + 0x20 + 8 * slot_idx) if bag else 0
+            if not it:
+                return False
+
+            body = self.ptr(me + 0x260)
+            body_len = self.num(body + 0x18, "<i") if body else 10
+            cmd = self.gadget_cmd(msgdlg)
+            if not cmd:
+                return False
+
+            old_page = self.num(panel + 0x238, "<i")
+            old_sel = self.num(panel + 0x230, "<i")
+            self.write(panel + 0x238, struct.pack("<i", 0))
+            self.write(panel + 0x230, struct.pack("<i", slot_idx + body_len + 1))
+            self.write(cmd + 0x90, struct.pack("<Q", 0))
+            self.write(cmd + 0x30, struct.pack("<Q", panel))
+            self.write(cmd + 0x38, struct.pack("<i", 2001))
+            self.write(dd_st + 0x100, struct.pack("<Q", msgdlg))
+            self.write(main_st + 0x4C, struct.pack("<i", 1))
+
+            t0 = time.monotonic()
+            ok = False
+            while time.monotonic() - t0 < 1.0:
+                if self.num(main_st + 0x4C, "<i") == 0:
+                    ok = True
+                    break
+                time.sleep(0.015)
+            self.write(panel + 0x238, struct.pack("<i", old_page))
+            self.write(panel + 0x230, struct.pack("<i", old_sel))
+            self.write(cmd + 0x38, struct.pack("<i", 0))
+            self.write(dd_st + 0x100, struct.pack("<Q", 0))
+            return ok
+
+    def read_current_menu(self):
+        """Đọc danh sách các mục (text) của menu đang hiển thị (nếu có)"""
+        dd_st = self.statics("dd")
+        menu = self.ptr(dd_st + 0xD0) if dd_st else 0
+        if not menu or self.read(menu + 0x10, 1) == b"\x00":
+            return []
+        items = self.vec_items(self.ptr(menu + 0x18))
+        caps = []
+        for c in items:
+            sub = [x for x in self.str_array(self.ptr(c + 0x28)) if x]
+            txt = norm_str(" ".join(sub) if sub else self.string(c + 0x20))
+            caps.append(txt)
+        return caps
+
+    def select_menu_option(self, pick_index):
+        """Chọn option pick_index trong menu đang hiển thị và kích hoạt callback"""
+        dd_st = self.statics("dd")
+        menu = self.ptr(dd_st + 0xD0) if dd_st else 0
+        if not menu or self.read(menu + 0x10, 1) == b"\x00":
+            return False
+        self.write(menu + 0x20, struct.pack("<i", pick_index))
+        self.write(menu + 0x85, b"\x00")
+        self.write(menu + 0x84, b"\x01")
+        self.call_fn(RVA_MENU_CLOSE, menu, 0)
+        return True
 
     def start_coffin_autobuy(self, threads=10, qty_per_thread=100, delay_ms=80, item_id=ITEM_ID_COFFIN):
         """Khởi chạy song song N luồng Auto Mua (như bấm Auto Mua + nhập 100 liên tiếp N lần) kèm vá giảm delay"""
@@ -1233,6 +1400,20 @@ class GameMemory:
             return s
         bag_used, skh_count, junk_slots, coffin_count, capsule_count = self.scan_bag(me)
         q = self.read_quest_info(me)
+        dd_st = self.statics("dd")
+        cur_scr = self.ptr(dd_st + 0xC8) if dd_st else 0
+        s["offline"] = bool(cur_scr) and cur_scr in (self.ptr(dd_st + 0xF0), self.ptr(dd_st + 0x398))
+        fg_st = self.statics("fg")
+        mju = self.ptr(fg_st + 0x28) if fg_st else 0
+        if mju and self.num(mju + 0x28, "<i") == self.num(me + 0x90, "<i"):  # chỉ tin khi gắn đúng id nhân vật đang chơi
+            s["boundUser"] = self.string(mju + 0x20).strip()
+        login_scr = self.ptr(dd_st + 0xF0) if dd_st else 0
+        if login_scr and not s["offline"]:
+            # ô Tài khoản / Mật khẩu của CHÍNH tab này: game chỉ nạp từ Rms chung ngay trước lúc đăng nhập (eq.cgi),
+            # nên khi đã vào game thì đây đúng là tài khoản tab vừa dùng
+            tf_user, tf_pass = self.ptr(login_scr + 0x30), self.ptr(login_scr + 0x38)
+            s["loginUser"] = self.string(tf_user + 0x28).strip() if tf_user else ""
+            s["loginPass"] = self.string(tf_pass + 0x28).strip() if tf_pass else ""
         s.update(ready=True, name=name, hp=self.num(me + 0xD0, "<q"), hpFull=self.num(me + 0x108, "<q"),
                  mp=self.num(me + 0xC8, "<q"), mpFull=self.num(me + 0x110, "<q"), dead=self.num(me + 0x88, "<i") == 14,
                  map=self.string(jb + 0x70), mapId=self.num(jb + 0x7C, "<i"), zone=self.num(jb + 0x84, "<i"),
@@ -1330,6 +1511,16 @@ class BossHunter:
         self.last_seen = 0.0
         self.last_fight_log = 0.0
         self.last_buff_try = 0.0
+        self.map_names = {}  # tên map (chuẩn hoá) -> id
+        self.hop_at = 0.0  # lần gần nhất tự đi qua cửa map (EXTRA_ROUTES)
+        self.empty_zone = False  # Khu trống: có người khác vào khu thì tự chuyển sang khu không người
+        self.ez_phase = "WATCH"
+        self.ez_seen_at = 0.0    # lúc bắt đầu thấy người khác trong khu
+        self.ez_check_at = 0.0
+        self.ez_t = 0.0
+        self.ez_req = -1
+        self.ez_arr = 0
+        self.ez_next_at = 0.0    # không đổi khu trước lúc này (hồi đổi khu / không có khu vắng hơn)
         self.loot_empty = 0
         self.last_loot_poll = 0.0
         self.attack_skill = 0
@@ -1370,6 +1561,21 @@ class BossHunter:
         self.coffin_info_seen = set()
         self.coffin_open_tries = 0
         self.coffin_shop_ready = False
+        # Trạng thái Auto Ấp Trứng & Mua Đá Linh Lực
+        self.egg_active = False
+        self.egg_phase = "INIT"         # INIT, SPEEDUP, BUY_STONE, HATCH, BUY_EGG, USE_EGG
+        self.egg_phase_t = 0.0
+        self.egg_delay = 120            # ms
+        self.egg_days_reduced = 0
+        self.egg_stones_bought = 0
+        self.egg_hatched_count = 0
+        self.egg_target_days = 0
+        self.egg_auto_buy_stone = True
+        self.egg_auto_buy_egg = True
+        self.egg_auto_use_egg = True
+        self.egg_status_text = "Đang dừng"
+        self.egg_last_action_at = 0.0
+        self.egg_single_action = None
 
     def log(self, msg):
         bh = self.mem.statics("bh")
@@ -1384,6 +1590,10 @@ class BossHunter:
             self.log(extra)
 
     def summary_text(self):
+        if self.egg_active or self.egg_single_action:
+            if self.egg_single_action:
+                return f"Ấp: {self.egg_single_action}"
+            return f"Ấp trứng ({self.egg_status_text})"
         if self.coffin_active or self.coffin_hourly:
             now = time.monotonic() * 1000.0
             if self.coffin_phase == "BURST":
@@ -1563,6 +1773,292 @@ class BossHunter:
                 f"Đang bắn {len(self.coffin_items)} luồng Auto Mua Quan Tài song song "
                 f"(mỗi luồng {n_qty} lần, delay {self.coffin_delay}ms | có {capsules} Capsule)..."
             )
+
+    def set_egg_auto(self, enabled, delay_ms=120, target_days=0, buy_stone=True, buy_egg=True, use_egg=True):
+        self.egg_active = bool(enabled)
+        self.egg_delay = max(40, min(2000, int(delay_ms)))
+        self.egg_target_days = max(0, int(target_days))
+        self.egg_auto_buy_stone = bool(buy_stone)
+        self.egg_auto_buy_egg = bool(buy_egg)
+        self.egg_auto_use_egg = bool(use_egg)
+        self.egg_phase = "INIT"
+        self.egg_phase_t = time.monotonic() * 1000.0
+        self.egg_status_text = "Đang chạy" if enabled else "Đã dừng"
+        self.log(f"{'BẬT' if enabled else 'TẮT'} Auto Ấp Trứng & Mua Đá Linh Lực (delay={self.egg_delay}ms)")
+
+    def stop_egg_auto(self, reason="Đã dừng Auto Ấp Trứng"):
+        self.egg_active = False
+        self.egg_single_action = None
+        self.egg_status_text = "Đã dừng"
+        self.log(reason)
+
+    def trigger_buy_stone_once(self):
+        self.egg_single_action = "BUY_STONE"
+        self.egg_phase_t = time.monotonic() * 1000.0
+        self.log("Bấm mua 99 Đá Linh Lực (1 lần)...")
+
+    def trigger_speedup_once(self):
+        self.egg_single_action = "SPEEDUP"
+        self.egg_phase_t = time.monotonic() * 1000.0
+        self.log("Bấm giảm 1 ngày (1 lần)...")
+
+    def trigger_hatch_once(self):
+        self.egg_single_action = "HATCH"
+        self.egg_phase_t = time.monotonic() * 1000.0
+        self.log("Bấm nở trứng (1 lần)...")
+
+    def interact_npc(self, npc_tpl_id):
+        bh_st = self.mem.statics("bh")
+        me = self.mem.ptr(bh_st + 0xA8) if bh_st else 0
+        npc = self.find_npc(npc_tpl_id)
+        if npc and me:
+            nx = self.mem.num(npc + 0x6C, "<i")
+            ny = self.mem.num(npc + 0x70, "<i")
+            mx = self.mem.num(me + 0x6C, "<i")
+            my = self.mem.num(me + 0x70, "<i")
+            if abs(mx - nx) > 50 or abs(my - ny) > 50:
+                self.mem.call_fn(RVA_TELEPORT, nx, (ny - 1) & 0xFFFFFFFF)
+            self.mem.call_fn(RVA_FOCUS_TO, me, npc)
+        hx_st = self.mem.statics("hx")
+        svc = self.mem.ptr(hx_st) if hx_st else 0
+        if svc:
+            self.mem.call_fn(RVA_OPEN_NPC_MENU, svc, npc_tpl_id & 0xFFFFFFFF)
+            return True
+        return False
+
+    def egg_tick(self, me, cur_map, cur_zone, now):
+        if not self.egg_active and not self.egg_single_action:
+            return False
+
+        if now - self.egg_last_action_at < self.egg_delay:
+            return True
+
+        da_ll, _ = self.mem.count_bag_item(me, ITEM_ID_DA_LINH_LUC)
+        thoi_vang, _ = self.mem.count_bag_item(me, ITEM_ID_THOI_VANG)
+
+        # Xử lý các lệnh đơn lẻ (chạy 1 lần)
+        if self.egg_single_action:
+            act = self.egg_single_action
+            caps = self.mem.read_current_menu()
+            if act == "BUY_STONE":
+                if caps:
+                    pick = -1
+                    for idx, c in enumerate(caps):
+                        if "99 đá linh lực" in c or "đá linh lực" in c:
+                            pick = idx
+                            break
+                    if pick >= 0:
+                        self.mem.select_menu_option(pick)
+                        self.egg_stones_bought += 99
+                        self.log("Đã mua 99 Đá Linh Lực thành công!")
+                        self.egg_single_action = None
+                        self.egg_last_action_at = now + 400
+                        return True
+                self.interact_npc(NPC_ID_KARIN)
+                self.egg_last_action_at = now + 300
+                return True
+
+            elif act == "SPEEDUP":
+                if caps:
+                    pick = -1
+                    for idx, c in enumerate(caps):
+                        if "1 ngày" in c or "30 đá ll" in c:
+                            pick = idx
+                            break
+                    if pick >= 0:
+                        self.mem.select_menu_option(pick)
+                        self.egg_days_reduced += 1
+                        self.log("Đã truyền linh lực giảm 1 ngày thành công!")
+                        self.egg_single_action = None
+                        self.egg_last_action_at = now + 300
+                        return True
+                self.interact_npc(NPC_ID_EGG)
+                self.egg_last_action_at = now + 300
+                return True
+
+            elif act == "HATCH":
+                if caps:
+                    pick = -1
+                    for idx, c in enumerate(caps):
+                        if any(w in c for w in ["nở", "no", "nhận", "nhan", "hoàn thành"]):
+                            pick = idx
+                            break
+                    if pick >= 0:
+                        self.mem.select_menu_option(pick)
+                        self.egg_hatched_count += 1
+                        self.log("Đã nở trứng thành công!")
+                        self.egg_single_action = None
+                        self.egg_last_action_at = now + 400
+                        return True
+                self.interact_npc(NPC_ID_EGG)
+                self.egg_last_action_at = now + 300
+                return True
+
+        # ---- XỬ LÝ TOÀN BỘ VÒNG LẶP AUTO CHÍNH ----
+        caps = self.mem.read_current_menu()
+
+        # 1. Nếu menu đang hiển thị trên màn hình:
+        if caps:
+            # 1.1. Menu có nút "Nở trứng" / "Nhận"
+            hatch_pick = -1
+            for idx, c in enumerate(caps):
+                if any(w in c for w in ["nở trứng", "no trung", "nhận", "nhan", "ấp trứng xong"]):
+                    hatch_pick = idx
+                    break
+            if hatch_pick >= 0:
+                self.mem.select_menu_option(hatch_pick)
+                self.egg_hatched_count += 1
+                self.egg_status_text = f"Đã nở quả thứ {self.egg_hatched_count}"
+                self.log(f"Trứng đã nở thành công! (Tổng số trứng đã nở: {self.egg_hatched_count})")
+                self.egg_last_action_at = now + 500
+                if self.egg_auto_buy_egg:
+                    self.egg_phase = "BUY_EGG"
+                else:
+                    self.stop_egg_auto("Trứng đã nở xong!")
+                return True
+
+            # 1.2. Menu có nút "1 ngày" (Menu Trứng)
+            speedup_pick = -1
+            for idx, c in enumerate(caps):
+                if "1 ngày" in c or "30 đá ll" in c:
+                    speedup_pick = idx
+                    break
+            if speedup_pick >= 0:
+                # Kiểm tra Đá Linh Lực
+                if da_ll < 30:
+                    if self.egg_auto_buy_stone:
+                        # Đóng menu trứng để chuyển sang mua đá ở Karin
+                        self.mem.select_menu_option(len(caps) - 1)  # Từ chối / đóng
+                        self.egg_phase = "BUY_STONE"
+                        self.egg_status_text = "Hết Đá LL -> Mua 99 Đá LL"
+                        self.log(f"Đá Linh Lực còn {da_ll} (< 30) -> Chuyển sang Karin mua 99 Đá LL (14 TV)...")
+                        self.egg_last_action_at = now + 250
+                        return True
+                    else:
+                        self.stop_egg_auto(f"Hết Đá Linh Lực (còn {da_ll} < 30)")
+                        return True
+
+                if thoi_vang < 3:
+                    self.stop_egg_auto(f"Hết Thỏi vàng (còn {thoi_vang} < 3 TV để giảm 1 ngày)")
+                    return True
+
+                # Bấm giảm 1 ngày
+                self.mem.select_menu_option(speedup_pick)
+                self.egg_days_reduced += 1
+                self.egg_status_text = f"Đang ấp (-{self.egg_days_reduced} ngày)"
+                self.egg_last_action_at = now + self.egg_delay
+                if self.egg_target_days > 0 and self.egg_days_reduced >= self.egg_target_days:
+                    self.stop_egg_auto(f"Đã hoàn thành mục tiêu giảm {self.egg_days_reduced} ngày!")
+                return True
+
+            # 1.3. Menu có nút "99 Đá Linh Lực" (Menu Karin)
+            stone_pick = -1
+            for idx, c in enumerate(caps):
+                if "99 đá linh lực" in c or "đá linh lực" in c:
+                    stone_pick = idx
+                    break
+            if stone_pick >= 0:
+                if thoi_vang < 14:
+                    self.stop_egg_auto(f"Hết Thỏi vàng để mua 99 Đá LL (còn {thoi_vang} < 14 TV)")
+                    return True
+                self.mem.select_menu_option(stone_pick)
+                self.egg_stones_bought += 99
+                self.egg_status_text = f"Đã mua {self.egg_stones_bought} Đá LL"
+                self.log(f"Đã mua 99 Đá Linh Lực (tốn 14 Thỏi vàng). Tổng mua: {self.egg_stones_bought}")
+                self.egg_phase = "SPEEDUP"
+                self.egg_last_action_at = now + 350
+                return True
+
+            # 1.4. Menu có nút "Cửa hàng" (Menu Karin khi cần mua trứng)
+            if self.egg_phase == "BUY_EGG":
+                shop_pick = -1
+                for idx, c in enumerate(caps):
+                    if "cửa hàng" in c or "shop" in c:
+                        shop_pick = idx
+                        break
+                if shop_pick >= 0:
+                    self.mem.select_menu_option(shop_pick)
+                    self.egg_status_text = "Mở Cửa hàng tìm Trứng"
+                    self.egg_last_action_at = now + 400
+                    return True
+
+        # 2. Nếu không có menu nào đang hiển thị:
+        if self.egg_phase == "INIT":
+            if da_ll < 30 and self.egg_auto_buy_stone:
+                self.egg_phase = "BUY_STONE"
+            else:
+                self.egg_phase = "SPEEDUP"
+            self.egg_last_action_at = now + 100
+            return True
+
+        elif self.egg_phase == "BUY_STONE":
+            if thoi_vang < 14:
+                self.stop_egg_auto(f"Hết Thỏi vàng (cần ít nhất 14 Thỏi vàng để mua 99 Đá LL)")
+                return True
+            self.egg_status_text = "Mở menu Thần mèo Karin"
+            self.interact_npc(NPC_ID_KARIN)
+            self.egg_last_action_at = now + 350
+            return True
+
+        elif self.egg_phase == "SPEEDUP":
+            if da_ll < 30:
+                if self.egg_auto_buy_stone:
+                    self.egg_phase = "BUY_STONE"
+                    self.egg_last_action_at = now + 100
+                    return True
+                else:
+                    self.stop_egg_auto(f"Hết Đá Linh Lực (còn {da_ll} < 30)")
+                    return True
+            self.egg_status_text = f"Mở Trứng Linh thú (-{self.egg_days_reduced} ngày)"
+            self.interact_npc(NPC_ID_EGG)
+            self.egg_last_action_at = now + 250
+            return True
+
+        elif self.egg_phase == "BUY_EGG":
+            slot, tid, name = self.mem.find_egg_in_bag(me)
+            if slot >= 0:
+                self.log(f"Trong hành trang đã có sẵn {name} (ô {slot}) -> Chuyển sang Sử dụng trứng...")
+                self.egg_phase = "USE_EGG"
+                self.egg_last_action_at = now + 200
+                return True
+
+            it_shop, tid_shop, name_shop = self.mem.find_egg_in_shop(me)
+            if it_shop and tid_shop > 0:
+                self.log(f"Tìm thấy {name_shop} (ID {tid_shop}) trong Cửa hàng -> Đang mua...")
+                self.mem.start_coffin_autobuy(threads=1, qty_per_thread=1, delay_ms=100, item_id=tid_shop)
+                dd_st = self.mem.statics("dd")
+                panel = self.mem.ptr(dd_st + 0xD8) if dd_st else 0
+                if panel:
+                    self.mem.call_fn(RVA_PANEL_HIDE, panel, 0)
+                self.egg_phase = "USE_EGG"
+                self.egg_last_action_at = now + 500
+                return True
+            else:
+                self.interact_npc(NPC_ID_KARIN)
+                self.egg_last_action_at = now + 350
+                return True
+
+        elif self.egg_phase == "USE_EGG":
+            if not self.egg_auto_use_egg:
+                self.stop_egg_auto("Đã mua trứng mới. Tự dùng trứng đang tắt.")
+                return True
+            slot, tid, name = self.mem.find_egg_in_bag(me)
+            if slot >= 0:
+                self.log(f"Đang sử dụng {name} từ hành trang (ô {slot}) vào ổ ấp...")
+                if self.mem.use_bag_item(slot):
+                    self.log(f"Đã đặt {name} vào ổ ấp thành công! Tiếp tục ấp trứng...")
+                    self.egg_phase = "SPEEDUP"
+                    self.egg_last_action_at = now + 600
+                    return True
+                else:
+                    self.egg_last_action_at = now + 400
+                    return True
+            else:
+                self.egg_phase = "BUY_EGG"
+                self.egg_last_action_at = now + 300
+                return True
+
+        return True
 
     def coffin_tick(self, me, cur_map, cur_zone, now):
         """Vòng lặp điều khiển mở Shop Santa, check giờ mỗi 1 phút (1x1), chỉ xả đa luồng ở 1-5 giây cuối và tự dừng ngay khi báo 59 phút"""
@@ -2173,7 +2669,7 @@ class BossHunter:
                 self.set_state("TRAVEL", f'Nhiệm vụ: tới map {q["map"]} tìm diệt {bname}')
                 self.xmap_at = 0.0
                 return
-            for b in reversed(self.boss_notices()):
+            for b in self.all_boss_notices():
                 if b["mapId"] > 0 and member_matches(bname, norm_str(b["name"])) and b["ptr"] not in self.done and now >= self.bad_maps.get(b["mapId"], 0):
                     self.cluster = cluster
                     self.target_map = b["mapId"]
@@ -2296,6 +2792,58 @@ class BossHunter:
             })
         return out
 
+    def go_waypoint(self, side):
+        """Đi qua cửa map bên "trái" / "phải" / "giữa" của map hiện tại: dịch vào cửa như XMAP (sa.hrw) rồi xin đổi map (-23).
+        Dùng được cả cửa giữa map (cửa giữa không tự đổi map khi chạm vào)."""
+        jb, hx_st = self.mem.statics("jb"), self.mem.statics("hx")
+        svc = self.mem.ptr(hx_st) if hx_st else 0
+        wps = self.mem.vec_items(self.mem.ptr(jb + 0xA0)) if jb else []
+        if not (svc and wps):
+            return False
+        min_x = lambda w: self.mem.num(w + 0x10, "<h")  # noqa: E731
+        width = self.mem.num(jb + 0x8, "<i")
+        if side == "giữa":  # cửa không nằm sát mép map
+            mids = [w for w in wps if self.mem.num(w + 0x14, "<h") >= 60 and min_x(w) <= width - 60]
+            if not mids:
+                return False
+            w = mids[0]
+        else:
+            w = max(wps, key=min_x) if side == "phải" else min(wps, key=min_x)
+        wx, max_x, max_y = min_x(w), self.mem.num(w + 0x14, "<h"), self.mem.num(w + 0x16, "<h")
+        x = 15 if max_x < 60 else (wx + 30 if wx <= width - 60 else width - 15)
+        self.mem.call_fn(RVA_TELEPORT, x, max_y)
+        time.sleep(0.3)  # server nhận vị trí mới (charMove) trước khi xin đổi map
+        self.mem.call_fn(RVA_REQUEST_CHANGE_MAP, svc, 0)
+        return True
+
+    def map_id_by_name(self, name):
+        """id map theo tên (TileMap.mapNames, jb+0xB8; vị trí trong mảng = id map), -1 nếu không thấy"""
+        if not self.map_names:
+            jb = self.mem.statics("jb")
+            arr = self.mem.ptr(jb + 0xB8) if jb else 0
+            n = self.mem.num(arr + 0x18, "<i") if arr else 0
+            self.map_names = {norm_str(self.mem.string(arr + 0x20 + 8 * i)): i for i in range(min(max(n, 0), 1000))}
+        return self.map_names.get(norm_str(name), -1)
+
+    def all_boss_notices(self):
+        """Thông báo boss mới nhất trước: danh sách của MOD (fq, chỉ giữ 6 cái) + dòng "BOSS X vừa xuất hiện tại Y"
+        trên kênh thông báo mà MOD bỏ sót (vd Ác Ma Picolo)"""
+        out = list(reversed(self.boss_notices()))
+        for b in out:
+            if b["mapId"] <= 0:  # bảng map của MOD thiếu map mới (vd Đồng Bằng Aru = 170) -> tra bảng tên map của game
+                b["mapId"] = self.map_id_by_name(b["map"])
+        have = {(norm_str(b["name"]), b["mapId"]) for b in out}
+        for ptr, text in self.world_notices():
+            hit = BOSS_APPEAR_RE.search(norm_str(text))
+            if not hit:
+                continue
+            name, map_name = hit.group(1).strip(), hit.group(2).strip()
+            map_id = self.map_id_by_name(map_name)
+            if map_id > 0 and (name, map_id) not in have:
+                have.add((name, map_id))
+                out.append({"ptr": ptr, "name": name, "map": map_name, "mapId": map_id})
+        return out
+
     def cluster_of(self, name, map_id, cfg):
         n = norm_str(name)
         for c in cfg["clusters"]:
@@ -2325,7 +2873,7 @@ class BossHunter:
                     pass
 
     def pick_target(self, now, cfg):
-        for b in reversed(self.boss_notices()):
+        for b in self.all_boss_notices():
             if b["ptr"] in self.done or b["mapId"] <= 0:
                 continue
             if now < self.bad_maps.get(b["mapId"], 0):
@@ -2507,6 +3055,66 @@ class BossHunter:
         self.last_zone_at = now
         return True
 
+    def other_players_here(self):
+        """Số người chơi khác trong khu (boss / đệ tử có id âm nên không tính)"""
+        return sum(1 for c in self.chars_in_map() if self.mem.num(c + 0x90, "<i") >= 0)
+
+    def empty_zone_tick(self, cur_zone, now):
+        """Khu trống: có người khác ở khu >= 5s thì mở danh sách khu, sang khu ít người nhất (ưu tiên 0 người).
+        Trả về True khi đang bận đổi khu (bỏ qua phần còn lại của tick)."""
+        if self.ez_phase == "WATCH":
+            if now < self.ez_check_at:
+                return False
+            self.ez_check_at = now + 2000.0
+            others = self.other_players_here()
+            if not others:
+                self.ez_seen_at = 0.0
+                return False
+            if not self.ez_seen_at:
+                self.ez_seen_at = now
+            if now - self.ez_seen_at < 5000 or now < self.ez_next_at:  # người đi ngang qua / đang chờ hồi đổi khu
+                return False
+            dg_st = self.mem.statics("dg")
+            gs = self.mem.ptr(dg_st + 0x18) if dg_st else 0
+            hx_st = self.mem.statics("hx")
+            svc = self.mem.ptr(hx_st) if hx_st else 0
+            if not (gs and svc):
+                return False
+            self.ez_arr = self.mem.ptr(gs + 0x80)
+            self.mem.call_fn(RVA_OPEN_ZONE_UI, svc, 0)
+            self.ez_phase, self.ez_t = "LIST", now
+            self.log(f"Khu {cur_zone} có {others} người khác -> tìm khu trống")
+            return True
+        if self.ez_phase == "LIST":
+            dg_st = self.mem.statics("dg")
+            gs = self.mem.ptr(dg_st + 0x18) if dg_st else 0
+            if gs and self.mem.ptr(gs + 0x80) == self.ez_arr and now - self.ez_t < 3000:
+                return True  # chờ server gửi danh sách khu
+            zones = [z for z in self.zone_list() if z["id"] != cur_zone and not (z["max"] > 0 and z["num"] >= z["max"])]
+            self.show_game_scr()  # đóng bảng chọn khu
+            others = self.other_players_here()
+            best = min(zones, key=lambda z: (z["num"], z["id"])) if zones else None
+            if not best or best["num"] >= max(others, 1):  # không có khu vắng hơn khu hiện tại
+                self.log("Không có khu nào vắng hơn, ở lại khu này 60s rồi xem lại")
+                self.ez_phase, self.ez_next_at, self.ez_seen_at = "WATCH", now + 60000.0, 0.0
+                return False
+            self.request_zone(best["id"], now)
+            self.ez_phase, self.ez_req, self.ez_t = "MOVE", best["id"], now
+            self.log(f'Sang khu {best["id"]} ({best["num"]} người)')
+            return True
+        # MOVE: chờ vào khu mới / đọc thông báo hồi đổi khu
+        if cur_zone == self.ez_req:
+            self.ez_phase, self.ez_seen_at, self.ez_check_at = "WATCH", 0.0, now + 3000.0  # chờ tải người trong khu
+            return False
+        kind, sec, _text = self.poll_zone_message()
+        if kind == "cooldown":
+            self.ez_next_at = now + sec * 1000.0 + 400.0
+            self.log(f"Còn {sec:g}s hồi đổi khu, chờ rồi tìm lại")
+        elif kind != "full" and now - self.ez_t < 6000:
+            return True
+        self.ez_phase, self.ez_seen_at = "WATCH", 0.0
+        return False
+
     def finish_target(self, reason):
         self.release_target()
         if self.notice_ptr:
@@ -2660,7 +3268,7 @@ class BossHunter:
             self.xmap_tries = 0
 
     def tick(self):
-        if not self.enabled and not self.quest_mode and not self.coffin_active and not self.coffin_hourly:
+        if not self.enabled and not self.quest_mode and not self.coffin_active and not self.coffin_hourly and not self.egg_active and not self.egg_single_action and not self.empty_zone:
             return
         cfg = self.get_cfg()
         now = time.monotonic() * 1000.0
@@ -2673,8 +3281,16 @@ class BossHunter:
         cur_map_name = self.mem.string(jb + 0x70)
         cur_zone = self.mem.num(jb + 0x84, "<i")
 
+        if self.egg_active or self.egg_single_action:
+            if self.egg_tick(me, cur_map, cur_zone, now):
+                return
+
         if self.coffin_active or self.coffin_hourly:
             if self.coffin_tick(me, cur_map, cur_zone, now):
+                return
+        # Khu trống: chỉ khi không bận săn boss / làm nhiệm vụ (đang săn thì bộ săn tự lo đổi khu) và còn sống
+        if self.empty_zone and self.state == "IDLE" and not self.quest_mode and self.mem.num(me + 0xD0, "<q") > 0:
+            if self.empty_zone_tick(cur_zone, now):
                 return
         if not self.enabled and not self.quest_mode:
             return
@@ -2716,6 +3332,16 @@ class BossHunter:
             if cur_map == self.target_map:
                 self.set_state("ARRIVE", f"Đã tới {cur_map_name}")
                 return
+            # map XMAP không biết (map mới): XMAP tới map kề rồi tự đi qua cửa map, xem EXTRA_ROUTES
+            route = EXTRA_ROUTES.get(self.target_map)
+            if route and cur_map == route[0]:
+                if now - self.hop_at > 5000:
+                    self.hop_at = now
+                    self.show_game_scr()
+                    if self.go_waypoint(route[1]):
+                        self.log(f"Đi qua cửa {route[1]} của {cur_map_name} sang map {self.target_map}")
+                return
+            xmap_to = route[0] if route else self.target_map
             rv_st = self.mem.statics("rv", init=True)
             xmap_running = bool(self.mem.read(rv_st, 1)[0]) if rv_st else False
             stalled = self.xmap_at != 0.0 and not xmap_running and now - self.xmap_at > 8000
@@ -2723,13 +3349,13 @@ class BossHunter:
                 if self.xmap_tries >= 2:
                     self.bad_maps[self.target_map] = now + cfg.get("badMapMs", 600000)
                     self.show_game_scr()
-                    self.finish_target(f"XMAP không tới được map {self.target_map}, bỏ qua 10 phút")
+                    self.finish_target(f"XMAP không tới được map {xmap_to}, bỏ qua 10 phút")
                     return
                 self.xmap_tries += 1
                 self.xmap_at = now
                 self.show_game_scr()
-                self.mem.call_fn(RVA_XMAP_START, self.target_map, 0)
-                self.log(f"XMAP tới map {self.target_map} (lần {self.xmap_tries})")
+                self.mem.call_fn(RVA_XMAP_START, xmap_to, 0)
+                self.log(f"XMAP tới map {xmap_to} (lần {self.xmap_tries})")
 
         elif self.state == "ARRIVE":
             if now - self.t > cfg.get("arriveDelayMs", 2500):
@@ -2919,7 +3545,11 @@ class Game:
         self.coffin_init = False
         self.pending_login = pending_login
         self.account = (pending_login["user"], pending_login.get("pass", "")) if pending_login and pending_login.get("user") else None
+        self.account_trusted = bool(self.account)  # tài khoản do bảng đăng nhập / nhận theo tên nhân vật, không đoán từ Rms chung
+        self.reconnect = True  # Tự kết nối lại khi mất kết nối (bảng tự đăng nhập đúng tài khoản của tab này)
+        self.reconnect_wait = 5.0
         self.last_reconnect_try = 0.0
+        self.cooldown_seen = 0  # thông báo "đăng nhập lại sau N giây" đã xử lý (mỗi thông báo chỉ tính 1 lần)
         self.boss = boss_hunter
         self.status = {}
         self.cpu_prev = None
@@ -2944,7 +3574,7 @@ class PanelApp:
         self.ensure_dll_patched(self.cfg.get("exePath"))
 
         root.title("Bảng điều khiển treo game, Đăng Nhập Ngầm, Auto Item, Auto Mua Quan Tài, Nhiệm Vụ & Săn BOSS - NgocRongViet")
-        root.geometry("1360x820")
+        root.geometry("1360x890")
         top = ttk.Frame(root, padding=(6, 4))
         top.pack(fill="x")
         self.lbl_machine = ttk.Label(top, text="Máy: ...", font=("Segoe UI", 10, "bold"))
@@ -3014,7 +3644,10 @@ class PanelApp:
         for key, label in FLAG_NAMES:
             ttk.Button(bar, text=label, command=lambda k=key: self.toggle_flag(k)).pack(side="left", padx=2)
         ttk.Button(bar, text="Tự dùng Item (Bật/Tắt)", command=self.toggle_auto_item_selected).pack(side="left", padx=2)
+        ttk.Button(bar, text="Auto Ấp Trứng (Bật/Tắt)", command=self.toggle_egg_auto_selected).pack(side="left", padx=2)
         ttk.Button(bar, text="Lọc đồ rác", command=self.toggle_filter_junk).pack(side="left", padx=2)
+        ttk.Button(bar, text="Khu trống (Bật/Tắt)", command=self.toggle_empty_zone_selected).pack(side="left", padx=2)
+        ttk.Button(bar, text="Kết nối lại (Bật/Tắt)", command=self.toggle_reconnect_selected).pack(side="left", padx=2)
         ttk.Button(bar, text="Tự làm NV (Bật/Tắt)", command=self.toggle_quest_selected).pack(side="left", padx=(6, 2))
         ttk.Button(bar, text="Săn Boss (Bật/Tắt)", command=self.toggle_boss_selected).pack(side="left", padx=2)
         ttk.Button(bar, text="Bỏ qua boss này", command=self.skip_boss_selected).pack(side="left", padx=2)
@@ -3093,6 +3726,49 @@ class PanelApp:
             command=self.on_toggle_auto_coffin,
         ).pack(side="left", padx=(8, 0))
 
+        # ---------- Khu vực Auto Ấp Trứng Nhanh & Mua Đá Linh Lực (Mốc 1 Ngày) ----------
+        egg_frame = ttk.LabelFrame(
+            root,
+            text="Auto Ấp Trứng Nhanh & Mua Đá Linh Lực (Mốc 1 Ngày - Karin & Trứng Linh Thú)",
+            padding=(6, 4),
+        )
+        egg_frame.pack(fill="x", padx=6, pady=(0, 4))
+
+        f_row1 = ttk.Frame(egg_frame)
+        f_row1.pack(fill="x")
+
+        self.btn_egg_toggle = ttk.Button(f_row1, text="BẮT ĐẦU AUTO ẤP TRỨNG", command=self.toggle_egg_auto_selected)
+        self.btn_egg_toggle.pack(side="left", padx=(0, 8))
+
+        ttk.Button(f_row1, text="Dừng Auto", command=self.stop_egg_selected).pack(side="left", padx=2)
+        ttk.Button(f_row1, text="Mua 99 Đá LL ngay", command=self.buy_stone_now_selected).pack(side="left", padx=4)
+        ttk.Button(f_row1, text="Giảm 1 ngày ngay", command=self.speedup_egg_now_selected).pack(side="left", padx=2)
+        ttk.Button(f_row1, text="Nở trứng ngay", command=self.hatch_egg_now_selected).pack(side="left", padx=2)
+
+        ttk.Label(f_row1, text="Delay (ms):").pack(side="left", padx=(8, 2))
+        self.var_egg_delay = tk.IntVar(value=self.cfg.get("eggDelayMs", 120))
+        ttk.Spinbox(f_row1, from_=40, to=1000, increment=20, width=5, textvariable=self.var_egg_delay, command=self.save_opts).pack(side="left")
+
+        ttk.Label(f_row1, text="Mục tiêu giảm (ngày):").pack(side="left", padx=(8, 2))
+        self.var_egg_target = tk.IntVar(value=self.cfg.get("eggTargetDays", 0))
+        ttk.Spinbox(f_row1, from_=0, to=999, width=4, textvariable=self.var_egg_target, command=self.save_opts).pack(side="left")
+        ttk.Label(f_row1, text="(0 = đến khi nở)").pack(side="left", padx=2)
+
+        f_row2 = ttk.Frame(egg_frame, padding=(0, 3, 0, 0))
+        f_row2.pack(fill="x")
+
+        self.var_egg_buy_stone = tk.BooleanVar(value=self.cfg.get("eggAutoBuyStone", True))
+        ttk.Checkbutton(f_row2, text="Tự mua 99 Đá LL khi < 30", variable=self.var_egg_buy_stone, command=self.save_opts).pack(side="left", padx=(0, 10))
+
+        self.var_egg_buy_egg = tk.BooleanVar(value=self.cfg.get("eggAutoBuyEgg", True))
+        ttk.Checkbutton(f_row2, text="Tự mua trứng mới khi nở", variable=self.var_egg_buy_egg, command=self.save_opts).pack(side="left", padx=(0, 10))
+
+        self.var_egg_use_egg = tk.BooleanVar(value=self.cfg.get("eggAutoUseEgg", True))
+        ttk.Checkbutton(f_row2, text="Tự dùng trứng khi có trong túi", variable=self.var_egg_use_egg, command=self.save_opts).pack(side="left", padx=(0, 10))
+
+        self.lbl_egg_status = ttk.Label(f_row2, text="Trạng thái: Đang dừng | Đã giảm: 0 ngày | Đã mua: 0 Đá LL | Nở: 0 quả", foreground="#1a73e8", font=("Segoe UI", 9, "bold"))
+        self.lbl_egg_status.pack(side="left", padx=(10, 0))
+
         # ---------- Khu vực cấu hình Săn Cụm BOSS & Nhật ký Nhiệm Vụ ----------
         boss_frame = ttk.LabelFrame(
             root,
@@ -3152,7 +3828,7 @@ class PanelApp:
             with self.lock:
                 games = list(self.games.values())
             for g in games:
-                if g.boss.enabled or g.boss.quest_mode or g.boss.coffin_active or g.boss.coffin_hourly:
+                if g.boss.enabled or g.boss.quest_mode or g.boss.coffin_active or g.boss.coffin_hourly or g.boss.egg_active or g.boss.egg_single_action or g.boss.empty_zone:
                     try:
                         g.boss.tick()
                     except Exception:
@@ -3250,10 +3926,9 @@ class PanelApp:
                 g.cpu_prev = (cpu, now)
             try:
                 g.status = g.mem.status()
-                cur_user = g.status.get("username") or ""
-                if cur_user and not g.account:
-                    g.account = (cur_user, (self.cfg.get("accounts") or {}).get(cur_user, ""))
-                if g.status.get("ready"):
+                if g.status.get("ready") and not g.status.get("offline"):
+                    self.learn_account(g)
+                if g.status.get("ready") and not g.status.get("offline"):
                     if not g.auto_item_init:
                         g.auto_item_init = True
                         if g.status.get("autoItemCount", 0) > 0:
@@ -3264,16 +3939,20 @@ class PanelApp:
                             threads, qty, delay_ms = self.get_coffin_opts()
                             g.boss.set_coffin_hourly(True, threads, qty, delay_ms)
                     if g.pending_login:
-                        if g.pending_login.get("auto_login", True):
+                        if g.pending_login.get("auto_login", True) and not g.reconnect:
                             g.mem.set_flag("al", True)
                             g.status["flags"]["al"] = True
                         g.pending_login = None
+                    if g.reconnect and g.account_trusted and (g.status.get("flags") or {}).get("al"):
+                        # Tự ĐN của MOD đọc acc/pass từ Rms chung -> dễ vào nhầm tài khoản tab khác; để bảng tự kết nối lại
+                        g.mem.set_flag("al", False)
+                        g.status["flags"]["al"] = False
                     if (g.status.get("flags") or {}).get("al"):
                         g.mem.ensure_auto_login_bound()
                     coffin_busy = g.boss.coffin_active and g.boss.coffin_phase in ("INIT", "TRAVEL", "OPEN_SHOP", "CHECK_TIME", "BURST")
                     if g.hidden:
                         g.mem.set_fps(60 if coffin_busy else g.hidden_fps)
-                    if not coffin_busy and (g.auto_item or g.status.get("autoItemCount", 0) > 0):
+                    if not coffin_busy and (g.auto_item or g.mem.panel_auto_ids):  # chưa bật trên bảng thì không đụng vào Auto Item của MOD
                         g.status["autoItemCount"] = g.mem.sync_auto_items(g.auto_item, target_ids, target_names)
                     # Không vứt đồ rác đúng lúc đang giao chiến với boss hoặc đang bắn Auto Mua Quan Tài
                     if not coffin_busy and g.filter_junk and g.status.get("junkSlots") and g.boss.state != "FIGHT":
@@ -3299,13 +3978,21 @@ class PanelApp:
                             g.mem.login_now(u, pw)
                             if g.pending_login["tries"] >= 10:
                                 g.pending_login = None
-                    elif (g.status.get("flags") or {}).get("al") and g.account and g.account[0]:
+                    elif g.reconnect and g.account_trusted and g.account and g.account[0]:
                         dup_ready = any(
-                            o.pid != g.pid and (o.status or {}).get("ready") and o.account and o.account[0] == g.account[0]
+                            o.pid != g.pid and (o.status or {}).get("ready") and not (o.status or {}).get("offline")
+                            and o.account and o.account[0] == g.account[0]
                             for o in games
                         )
-                        if not dup_ready and now - g.last_reconnect_try >= 5.0:
+                        cd = g.mem.login_cooldown()  # "Bạn chỉ có thể đăng nhập lại sau N giây nữa" -> chờ đúng N giây
+                        if cd and cd[0] != g.cooldown_seen:
+                            g.cooldown_seen = cd[0]
+                            g.last_reconnect_try, g.reconnect_wait = now, cd[1] + 1.0
+                        # server bị DDoS thì thử thưa dần (5s, 10s, 20s... tối đa 60s), vào được thì về lại 5s
+                        if not dup_ready and now - g.last_reconnect_try >= g.reconnect_wait:
                             g.last_reconnect_try = now
+                            g.reconnect_wait = min(60.0, max(5.0, g.reconnect_wait) * 2)
+                            self.events.put(("boss_log", f"[{g.account[0]}] Mất kết nối -> đăng nhập lại (lần sau chờ {g.reconnect_wait:g}s)"))
                             g.mem.login_now(g.account[0], g.account[1])
             except OSError:
                 pass
@@ -3346,6 +4033,17 @@ class PanelApp:
                 self.tree.delete(pid)
         for pid, g in games.items():
             self.tree_row(g)
+        pids = self.selected() or list(games.keys())
+        first_game = games.get(pids[0]) if pids else None
+        if first_game:
+            bh = first_game.boss
+            bh_st = first_game.mem.statics("bh") if first_game.mem else 0
+            me_ptr = first_game.mem.ptr(bh_st + 0xA8) if bh_st else 0
+            da_ll, _ = first_game.mem.count_bag_item(me_ptr, ITEM_ID_DA_LINH_LUC) if me_ptr else (0, 0)
+            tv, _ = first_game.mem.count_bag_item(me_ptr, ITEM_ID_THOI_VANG) if me_ptr else (0, 0)
+            txt = f"Trạng thái: {bh.egg_status_text} | Đã giảm: {bh.egg_days_reduced} ngày | Đã mua: {bh.egg_stones_bought} Đá LL | Nở: {bh.egg_hatched_count} quả | Còn: {da_ll} Đá LL, {tv} TV"
+            self.lbl_egg_status.config(text=txt)
+            self.btn_egg_toggle.config(text="DỪNG AUTO ẤP TRỨNG" if bh.egg_active else "BẮT ĐẦU AUTO ẤP TRỨNG")
         self.root.after(1000, self.refresh_ui)
 
     def tree_row(self, g):
@@ -3378,8 +4076,14 @@ class PanelApp:
             flag_list.append(f"Auto Item({cnt})" if cnt else "Auto Item")
         if g.filter_junk:
             flag_list.append("Lọc rác")
+        if g.boss.empty_zone:
+            flag_list.append("Khu trống")
+        if g.reconnect:
+            flag_list.append("Kết nối lại" if g.account_trusted else "Kết nối lại (chưa rõ TK)")
         if g.boss.quest_mode:
             flag_list.append("Làm NV")
+        if g.boss.egg_active:
+            flag_list.append("Ấp trứng")
         if g.boss.coffin_hourly:
             flag_list.append("Canh QT 1h")
         elif g.boss.coffin_active:
@@ -3432,7 +4136,7 @@ class PanelApp:
         for pid in self.selected():
             g = self.games.get(pid)
             if g and not (g.status or {}).get("ready"):
-                g.account = (user, pw)
+                g.account, g.account_trusted = (user, pw), True
                 g.auto_item = auto_it or g.auto_item
                 g.pending_login = dict(pend)
                 if hide_bg:
@@ -3462,7 +4166,7 @@ class PanelApp:
                 continue
             u, p = (user, pw) if user else (g.account or ("", ""))
             if u:
-                g.account = (u, p)
+                g.account, g.account_trusted = (u, p), True
             g.pending_login = {"user": u, "pass": p, "hide": g.hidden, "auto_login": True, "auto_item": g.auto_item, "last_try": time.monotonic(), "tries": 1}
             try:
                 g.mem.set_flag("al", True)
@@ -3564,6 +4268,60 @@ class PanelApp:
                     g.boss.set_enabled(target)
                 except OSError:
                     pass
+
+    def toggle_empty_zone_selected(self):
+        pids = self.selected()
+        if not pids:
+            messagebox.showinfo("Khu trống", "Hãy chọn ít nhất 1 dòng nhân vật để bật/tắt tự tìm khu trống.")
+            return
+        first_game = self.games.get(pids[0])
+        target = not (first_game.boss.empty_zone if first_game else False)
+        for pid in pids:
+            g = self.games.get(pid)
+            if g:
+                g.boss.empty_zone = target
+                g.boss.ez_phase, g.boss.ez_seen_at, g.boss.ez_next_at = "WATCH", 0.0, 0.0
+
+    def toggle_reconnect_selected(self):
+        pids = self.selected()
+        if not pids:
+            messagebox.showinfo("Tự kết nối lại", "Hãy chọn ít nhất 1 dòng nhân vật để bật/tắt tự kết nối lại.")
+            return
+        first_game = self.games.get(pids[0])
+        target = not (first_game.reconnect if first_game else True)
+        for pid in pids:
+            g = self.games.get(pid)
+            if g:
+                g.reconnect, g.reconnect_wait = target, 5.0
+
+    def learn_account(self, g):
+        """Tab đang trong game: nhớ / nhận lại tài khoản theo tên nhân vật, rồi tới tài khoản MOD gắn đúng nhân vật,
+        cuối cùng là ô đăng nhập của chính tab (không đoán từ Rms dùng chung)"""
+        name = (g.status or {}).get("name") or ""
+        if not name:
+            return
+        g.reconnect_wait = 5.0
+        char_accs = self.cfg.setdefault("charAccounts", {})
+        if g.account_trusted and g.account and g.account[0]:
+            mapped = char_accs.get(name)
+            if not mapped:
+                char_accs[name] = g.account[0]
+                save_config(self.cfg)
+            elif mapped != g.account[0]:
+                # nhân vật này đã biết là của tài khoản khác -> tab đã vào nhầm tài khoản (vd Tự ĐN của MOD đọc Rms chung):
+                # không ghi đè, theo đúng tài khoản thật để kết nối lại không giành nhau với tab kia
+                g.account = (mapped, (self.cfg.get("accounts") or {}).get(mapped, ""))
+            return
+        login_user = g.status.get("loginUser") or ""
+        user = char_accs.get(name) or g.status.get("boundUser") or login_user
+        if not user:
+            return
+        accs = self.cfg.setdefault("accounts", {})
+        pw = accs.get(user) or (g.status.get("loginPass") if user == login_user else "") or ""
+        if pw and not accs.get(user):
+            accs[user] = pw  # chỉ lưu vào cấu hình bảng, không ghi Rms chung (ghi Rms là tab khác đọc nhầm)
+            save_config(self.cfg)
+        g.account, g.account_trusted = (user, pw), True
 
     def skip_boss_selected(self):
         for pid in self.selected():
@@ -3729,6 +4487,88 @@ class PanelApp:
             self.ensure_dll_patched(self.cfg["exePath"])
             save_config(self.cfg)
 
+    def get_egg_opts(self):
+        try:
+            delay_ms = max(40, min(2000, int(self.var_egg_delay.get())))
+        except (tk.TclError, ValueError):
+            delay_ms = 120
+        try:
+            target_days = max(0, min(1000, int(self.var_egg_target.get())))
+        except (tk.TclError, ValueError):
+            target_days = 0
+        auto_buy_stone = bool(self.var_egg_buy_stone.get())
+        auto_buy_egg = bool(self.var_egg_buy_egg.get())
+        auto_use_egg = bool(self.var_egg_use_egg.get())
+        return delay_ms, target_days, auto_buy_stone, auto_buy_egg, auto_use_egg
+
+    def toggle_egg_auto_selected(self):
+        pids = self.selected() or list(self.games.keys())
+        if not pids:
+            messagebox.showinfo("Auto Ấp Trứng", "Chưa có tiến trình game nào đang mở.")
+            return
+        self.save_opts()
+        delay_ms, target_days, buy_stone, buy_egg, use_egg = self.get_egg_opts()
+        first_game = self.games.get(pids[0])
+        target = not (first_game.boss.egg_active if first_game else False)
+        for pid in pids:
+            g = self.games.get(pid)
+            if g:
+                try:
+                    g.boss.set_egg_auto(target, delay_ms, target_days, buy_stone, buy_egg, use_egg)
+                except OSError:
+                    pass
+        self.btn_egg_toggle.config(text="DỪNG AUTO ẤP TRỨNG" if target else "BẮT ĐẦU AUTO ẤP TRỨNG")
+
+    def stop_egg_selected(self):
+        pids = self.selected() or list(self.games.keys())
+        for pid in pids:
+            g = self.games.get(pid)
+            if g:
+                try:
+                    g.boss.stop_egg_auto("Đã dừng Auto Ấp Trứng")
+                except OSError:
+                    pass
+        self.btn_egg_toggle.config(text="BẮT ĐẦU AUTO ẤP TRỨNG")
+
+    def buy_stone_now_selected(self):
+        pids = self.selected() or list(self.games.keys())
+        if not pids:
+            messagebox.showinfo("Mua Đá Linh Lực", "Chưa có tiến trình game nào đang mở.")
+            return
+        for pid in pids:
+            g = self.games.get(pid)
+            if g:
+                try:
+                    g.boss.trigger_buy_stone_once()
+                except OSError:
+                    pass
+
+    def speedup_egg_now_selected(self):
+        pids = self.selected() or list(self.games.keys())
+        if not pids:
+            messagebox.showinfo("Giảm 1 Ngày", "Chưa có tiến trình game nào đang mở.")
+            return
+        for pid in pids:
+            g = self.games.get(pid)
+            if g:
+                try:
+                    g.boss.trigger_speedup_once()
+                except OSError:
+                    pass
+
+    def hatch_egg_now_selected(self):
+        pids = self.selected() or list(self.games.keys())
+        if not pids:
+            messagebox.showinfo("Nở Trứng", "Chưa có tiến trình game nào đang mở.")
+            return
+        for pid in pids:
+            g = self.games.get(pid)
+            if g:
+                try:
+                    g.boss.trigger_hatch_once()
+                except OSError:
+                    pass
+
     def save_opts(self):
         try:
             self.cfg["hiddenFps"] = max(3, min(60, self.var_fps.get()))
@@ -3745,6 +4585,12 @@ class PanelApp:
         self.cfg["coffinQty"] = qty
         self.cfg["coffinDelayMs"] = delay_ms
         self.cfg["autoCoffin"] = bool(self.var_auto_coffin.get())
+        egg_delay, egg_target, egg_buy_stone, egg_buy_egg, egg_use_egg = self.get_egg_opts()
+        self.cfg["eggDelayMs"] = egg_delay
+        self.cfg["eggTargetDays"] = egg_target
+        self.cfg["eggAutoBuyStone"] = egg_buy_stone
+        self.cfg["eggAutoBuyEgg"] = egg_buy_egg
+        self.cfg["eggAutoUseEgg"] = egg_use_egg
         save_config(self.cfg)
         for g in list(self.games.values()):
             g.boss.coffin_threads = threads

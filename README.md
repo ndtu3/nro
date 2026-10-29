@@ -43,3 +43,13 @@ Nên bật **Tự động ăn đậu** trong menu MOD để hồi máu khi chạ
    - Công cụ sẽ tự động tìm `GameAssembly.dll` trong thư mục `Downloads`, `Desktop`, cùng thư mục chứa tool, hoặc mở hộp thoại để bạn chọn file `GameAssembly.dll` / `NgocRongViet.exe`.
 3. **Bước 2 — Sử dụng trong game:**
    - Mở lại `NgocRongViet.exe`, đi lên **45.Thần điện** và chat lệnh `vqmm` (hoặc mở `run_auto.bat` rồi bấm nút **BẬT / TẮT AUTO VÒNG QUAY MAY MẮN**).
+
+
+## Auto Ấp Trứng Nhanh & Mua Đá Linh Lực (Karin & Trứng Linh Thú)
+Tính năng tự động hóa chu trình nuôi/ấp trứng Linh Thú khép kín trên `control_panel.py`:
+1. **Ấp trứng nhanh mốc 1 ngày:** Tự động tương tác với **Trứng Linh thú** (NPC 80), chọn mốc giảm **1 ngày** (tiêu hao 30 Đá Linh Lực + 3 Thỏi vàng).
+2. **Tự mua Đá Linh Lực:** Khi Đá Linh Lực trong hành trang dưới 30 viên, tự động chuyển sang tương tác với **Thần mèo Karin** (NPC 18) và mua gói **99 Đá Linh Lực** (giá 14 Thỏi vàng), sau đó quay lại ấp trứng tiếp.
+3. **Tự nở trứng:** Khi thời gian ấp đếm lùi về 0 (hoàn tất), tự động chọn **Nở trứng / Nhận** để thu hoạch Linh Thú.
+4. **Tự mua trứng mới & sử dụng:** Tự mở Cửa hàng Karin để mua quả trứng mới, sau đó tự bấm **Sử dụng** trong hành trang để đưa trứng vào ổ ấp.
+5. **Vòng lặp liên tục:** Tự động lặp lại quy trình trên không ngừng cho đến khi bạn bấm dừng hoặc cài đặt mục tiêu số ngày giảm.
+- Kèm theo các phím bấm nhanh tiện lợi: **Mua 99 Đá LL ngay**, **Giảm 1 ngày ngay**, **Nở trứng ngay**.

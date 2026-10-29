@@ -25,7 +25,7 @@
   "clusters": [
     {
       "name": "Tiểu Đội Sát Thủ (Nappa)",
-      "enabled": true,
+      "enabled": false,
       "maps": [
         "63-83"
       ],
@@ -53,7 +53,7 @@
     },
     {
       "name": "Fide Đại Ca (Núi Khỉ Vàng)",
-      "enabled": true,
+      "enabled": false,
       "members": [
         "Fide đại ca 1",
         "Fide đại ca 2",
@@ -143,7 +143,7 @@
     },
     {
       "name": "Bojack",
-      "enabled": true,
+      "enabled": false,
       "members": [
         "Bojack",
         "Bido",
@@ -228,7 +228,7 @@
     },
     {
       "name": "Ác Ma Picolo",
-      "enabled": false,
+      "enabled": true,
       "members": [
         "Ác Ma Picolo"
       ]
