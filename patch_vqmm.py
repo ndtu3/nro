@@ -97,6 +97,43 @@ def get_vqmm_v2_patches():
                 + bytes([144] * 18)
             ),
         ),
+        # 9. Chống tự đăng nhập nhầm sang tài khoản của tab khác (vd: anhtujdaj1):
+        # - Khi đổi map / vào game (CLEAR_MAP -22 tại 0x4907B4): không gọi loginScr.savePass() ghi đè Rms("acc") chung trên ổ cứng.
+        # - Khi LoginScr.switchToMe() (0x519632, gọi từ nút "Đăng nhập" màn hình chọn server hoặc QLTK): gọi eq.cgi (0x51BDB0)
+        #   nạp ngay Rms("acc")/Rms("pass") vào loginScr.tfUser/tfPass của tab hiện tại (thay vì giữ nguyên tài khoản cũ từ lúc mở game).
+        # - Khi nhận phản hồi kết nối (0x47C86A): gửi gói đăng nhập bằng loginScr.tfUser.text / tfPass.text trong RAM của chính tab này
+        #   thay vì đọc lại file Rms("acc")/Rms("pass") dùng chung trên ổ cứng.
+        (
+            "Login_NoSavePassOnClearMap",
+            0x4907B4,
+            (bytes.fromhex("e8 d7 c9 08 00"),),
+            bytes.fromhex("90 90 90 90 90"),
+        ),
+        (
+            "Login_ReloadRmsOnSwitchToMe",
+            0x519632,
+            (bytes.fromhex("48 8b 0d 17 07 6f 00 83 b9 e0 00 00"),),
+            bytes.fromhex("48 89 d9 31 d2 e8 74 27 00 00 eb 23"),
+        ),
+        (
+            "Login_UseTfUserOnConnectOK",
+            0x47C86A,
+            (
+                bytes.fromhex(
+                    "33c9e8dffcdaff488bd833d2488b0dfba77800e8be44daff488bf033d2488b0d42bf7700e8ad44daff4c8bf0"
+                ),
+            ),
+            bytes.fromhex(
+                "488b7130"          # mov rsi, [rcx + 0x30] (loginScr.tfUser)
+                "488b7628"          # mov rsi, [rsi + 0x28] (tfUser.text)
+                "4c8b7138"          # mov r14, [rcx + 0x38] (loginScr.tfPass)
+                "4d8b7628"          # mov r14, [r14 + 0x28] (tfPass.text)
+                "31c9"              # xor ecx, ecx
+                "e8cffcdaff"        # call 0x22c550 (Service.gI())
+                "4889c3"            # mov rbx, rax
+                + "90" * 18
+            ),
+        ),
     ]
 
 if sys.stdout:  # bản .exe không cửa sổ console thì không có stdout
@@ -457,8 +494,10 @@ def patch_dll(dll_path=None):
         ("FPS_Range_Input_Min", 0x5410AD, bytes.fromhex("8d 43 e2"), bytes.fromhex("8d 43 ff")),
     ]
 
-    v2_map = {p[0]: p for p in get_vqmm_v2_patches()}
-    patches = [v2_map.get(p[0], p) for p in patches] + [v2_map["VQMM_Fix_MoVongQuay_Step2"]]
+    v2_patches = get_vqmm_v2_patches()
+    v2_map = {p[0]: p for p in v2_patches}
+    existing_names = {p[0] for p in patches}
+    patches = [v2_map.get(p[0], p) for p in patches] + [p for p in v2_patches if p[0] not in existing_names]
 
     source_path = bak_path if os.path.exists(bak_path) else dll_path
     with open(source_path, "rb") as f:

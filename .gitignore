@@ -8,3 +8,5 @@ panel_config.json
 dist/
 ControlPanel.old.exe
 ControlPanel.old2.exe
+build/
+ControlPanel.spec

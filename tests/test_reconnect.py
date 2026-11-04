@@ -64,6 +64,58 @@ f = game("NvA", ("accB", "passB"))
 app.learn_account(f)
 assert app.cfg["charAccounts"]["NvA"] == "accA" and f.account == ("accA", "passA"), (app.cfg["charAccounts"], f.account)
 
+# Đổi tài khoản ngay trên cùng cửa sổ game (từ NvA/accA sang NvE/accE): không giữ accA cũ mà học đúng accE mới
+a.status = {"name": "NvE", "loginUser": "accE", "loginPass": "passE"}
+app.learn_account(a)
+assert a.account == ("accE", "passE") and a.account_trusted, a.account
+app.learn_account(a)
+assert app.cfg["charAccounts"]["NvE"] == "accE", app.cfg["charAccounts"]
+
+# Nhân vật mới NvF vào game nhưng loginUser bị kẹt tài khoản cũ đã thuộc về NvA (accA): không gán nhầm accA cho NvF
+cp.read_rms_login = lambda: ("accA", "passA")
+g_stale = game("NvF")
+g_stale.status.update(loginUser="accA", loginPass="passA")
+app.learn_account(g_stale)
+assert g_stale.account is None and not g_stale.account_trusted, g_stale.account
+
+# _login_now ở màn hình chọn server (cur_scr == srv_scr): phải nạp lại loginScr từ Rms trước khi bấm nút Đăng nhập (3)
+calls = []
+
+
+class FakeLoginMem(cp.GameMemory):
+    def __init__(self):
+        pass
+
+    def statics(self, cls, init=False):
+        return 0x1000 if cls == "dd" else 0
+
+    def ptr(self, addr):
+        if addr == 0x1000 + 0xC8:
+            return 0x3000  # cur_scr == srv_scr
+        if addr == 0x1000 + 0x398:
+            return 0x3000  # srv_scr
+        if addr == 0x1000 + 0xF0:
+            return 0x2000  # login_scr
+        return 0
+
+    def call_fn(self, fn_rva, rcx=0, rdx=0):
+        calls.append(("call_fn", fn_rva, rcx))
+        return True
+
+    def perform_action(self, listener, id_action, p_obj=0):
+        calls.append(("perform", listener, id_action))
+        return True
+
+
+cp.save_rms_login = lambda u, p: calls.append(("save_rms", u, p))
+FakeLoginMem()._login_now("accE", "passE")
+assert calls == [
+    ("save_rms", "accE", "passE"),
+    ("call_fn", cp.RVA_LOAD_ACC_MGR, 0),
+    ("call_fn", cp.RVA_LOGIN_RELOAD_RMS, 0x2000),
+    ("perform", 0x3000, 3),
+], calls
+
 # 2 tab mất kết nối cùng lúc: ghi Rms + nạp + đăng nhập của tab này phải xong hẳn rồi tab kia mới được ghi
 order = []
 

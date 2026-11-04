@@ -283,6 +283,15 @@ LOGIN_LOCK = threading.Lock()
 BOSS_APPEAR_RE = re.compile(r"boss (.+?) vừa xuất hiện tại (.+?)(?: khu vực.*)?$")
 
 
+def read_rms_login():
+    """Đọc (username, password) hiện tại từ Rms acc/pass (hoặc accManager)"""
+    u = read_rms_string("acc").strip()
+    pw = read_rms_string("pass").strip()
+    if u and not pw:
+        pw = load_rms_accounts().get(u, "")
+    return u, pw
+
+
 def save_rms_login(username, password):
     """Lưu tài khoản & mật khẩu vào Rms của game (acc, pass, accManager) để đăng nhập ngay"""
     username = (username or "").strip()
@@ -409,6 +418,7 @@ D_PICKED, D_FORCE, D_FPS_REQ, D_ACTION_BUF = 0xEFBD20, 0xEFBD80, 0xEFBD84, 0xEFB
 # RVA các hàm trong GameAssembly.dll dùng cho Săn Cụm BOSS, Nhiệm Vụ, Đăng Nhập, Tự dùng Item & Auto Mua Quan Tài
 RVA_CLASS_INIT = 0x953D0
 RVA_XMAP_START = 0x46E5F0
+RVA_XMAP_STOP = 0x46E690
 RVA_CHANGE_ZONE = 0x230C70
 RVA_CHAR_MOVE = 0x230DF0
 RVA_OPEN_ZONE_UI = 0x232000
@@ -419,11 +429,14 @@ RVA_SELECT_SKILL_SRV = 0x231C50
 RVA_PANEL_HIDE = 0x1EDFA0
 RVA_TELEPORT = 0x537F10
 RVA_REQUEST_CHANGE_MAP = 0x230B20  # hx.dql(): Service.requestChangeMap (gói -23) - xin qua cửa map đang đứng
+RVA_CMD_PERFORM = 0x4892A0         # Command.performAction - kích hoạt lệnh cửa map (waypoint.popup.command) như XMAP sa.hrw
 # map XMAP của MOD không biết đường: map đích -> (map kề XMAP tới được, cửa cần đi qua ở map kề)
 EXTRA_ROUTES = {170: (0, "giữa")}  # Đồng Bằng Aru: cửa giữa map Làng Aru (Làng Aru ở bên phải Nhà Gôhan)
 RVA_FOCUS_TO = 0x19AA70
 RVA_OPEN_NPC_MENU = 0x232340
 RVA_MENU_CLOSE = 0x50D360
+RVA_MENU_SELECT = 0x50D680
+RVA_USE_ITEM_BY_TID = 0x536B90
 RVA_MOD_INSTANCE = 0x549BA0
 RVA_LOGIN_RELOAD_RMS = 0x51BDB0
 RVA_LOGIN_DO_LOGIN = 0x51CC40
@@ -437,8 +450,14 @@ ITEM_ID_COFFIN = 1116             # Hòm Halloween (Quan tài)
 ITEM_ID_CAPSULE_HALLOWEEN = 818   # Capsule Halloween (20 capsule = 1 Hòm Halloween)
 NPC_ID_SANTA = 39                 # NPC Santa
 SANTA_MAPS = (5, 13, 20)          # Đảo Kamê, Đảo Guru, Vách núi đen
-NPC_ID_KARIN = 18                 # Thần Mèo Karin (mua 99 Đá Linh Lực / Cửa hàng trứng)
-NPC_ID_EGG = 80                   # Trứng Linh Thú (ổ ấp trứng Linh Thú)
+NPC_ID_BUNMA_HOME = 37            # Bunma tại Nhà Bunma (map 101: Cửa hàng bán Trứng Linh Thú / 99 Đá Linh Lực)
+NPC_ID_KARIN = 18                 # Thần Mèo Karin (hỗ trợ song song cùng Bunma)
+NPC_ID_MABU_EGG = 50              # Trứng Mabu / Trứng Linh Thú tại Nhà Bunma (map 101)
+NPC_ID_EGG = 80                   # Trứng Linh Thú (ổ ấp trứng Linh Thú dự phòng)
+EGG_SHOP_NPC_IDS = (NPC_ID_BUNMA_HOME, NPC_ID_KARIN)
+EGG_INCUBATOR_NPC_IDS = (NPC_ID_MABU_EGG, NPC_ID_EGG)
+MAP_ID_SIEU_THI = 84              # Map Siêu Thị (kề bên phải Nhà Bunma map 101)
+MAP_ID_NHA_BUNMA = 101            # Map Nhà Bunma (nơi đặt và ấp Trứng Linh Thú)
 ITEM_ID_DA_LINH_LUC = 700         # Đá Linh Lực (tid = 700)
 ITEM_ID_THOI_VANG = 457           # Thỏi vàng (tid = 457)
 
@@ -471,6 +490,14 @@ def cluster_allows_map(c, map_id):
     if c.get("excludeMaps") and in_map_list(c["excludeMaps"], map_id):
         return False
     return True
+
+
+# boss con do boss chính sinh ra, phải hạ trước (boss chính bất tử khi còn con) - dùng khi cụm không ghi "minions"
+DEFAULT_MINIONS = {"siêu bọ hung": ["Xên con *"]}
+
+
+def cluster_minions(cluster):
+    return cluster.get("minions") or DEFAULT_MINIONS.get(norm_str(cluster.get("name", "")), [])
 
 
 def member_matches(m, name_norm):
@@ -977,7 +1004,27 @@ class GameMemory:
                         return u
         return ""
 
-    def ensure_auto_login_bound(self):
+    def sync_login_box(self, username, password=""):
+        """Đồng bộ ô Tài khoản / Mật khẩu (loginScr.tfUser/tfPass) trong bộ nhớ của chính tiến trình game này"""
+        username = (username or "").strip()
+        if not username:
+            return False
+        dd_st = self.statics("dd")
+        login_scr = self.ptr(dd_st + 0xF0) if dd_st else 0
+        if not login_scr:
+            return False
+        tf_user, tf_pass = self.ptr(login_scr + 0x30), self.ptr(login_scr + 0x38)
+        cur_u = self.string(tf_user + 0x28).strip() if tf_user else ""
+        cur_p = self.string(tf_pass + 0x28).strip() if tf_pass else ""
+        if cur_u == username and (not password or cur_p == password):
+            return True
+        with LOGIN_LOCK:
+            save_rms_login(username, password if password else cur_p)
+            self.call_fn(RVA_LOAD_ACC_MGR, 0, 0)
+            self.call_fn(RVA_LOGIN_RELOAD_RMS, login_scr, 0)
+        return True
+
+    def ensure_auto_login_bound(self, username=None, password=None):
         """Khi cờ Tự ĐN (fg+0x21) đang bật và nhân vật đã vào game, đảm bảo fg.mju (fg+0x28) đã gắn đúng tài khoản & nhân vật"""
         fg_st, bh_st, dd_st = self.statics("fg"), self.statics("bh"), self.statics("dd")
         if not (fg_st and bh_st and dd_st):
@@ -988,9 +1035,12 @@ class GameMemory:
         login_scr = self.ptr(dd_st + 0xF0)
         if not (me and login_scr):
             return False
+        if username:
+            self.sync_login_box(username, password or "")
         char_id = self.num(me + 0x90, "<i")
         mju = self.ptr(fg_st + 0x28)
-        if mju and self.num(mju + 0x28, "<i") == char_id and self.string(mju + 0x20).strip():
+        mju_user = self.string(mju + 0x20).strip() if mju else ""
+        if mju and self.num(mju + 0x28, "<i") == char_id and mju_user and (not username or mju_user == username):
             return True
         self.call_fn(RVA_LOAD_ACC_MGR, 0, 0)
         tf_user = self.ptr(login_scr + 0x30)
@@ -1016,13 +1066,13 @@ class GameMemory:
             return False
         cur_scr = self.ptr(dd_st + 0xC8)
         srv_scr = self.ptr(dd_st + 0x398)
-        if srv_scr and cur_scr == srv_scr:
-            # mất kết nối xong game về màn hình chọn server: nút "Đăng nhập" (3) đọc acc/pass vừa ghi vào Rms
-            return self.perform_action(srv_scr, 3, 0)
-        self.call_fn(RVA_LOAD_ACC_MGR, 0, 0)
         login_scr = self.ptr(dd_st + 0xF0)
+        self.call_fn(RVA_LOAD_ACC_MGR, 0, 0)
         if login_scr:
             self.call_fn(RVA_LOGIN_RELOAD_RMS, login_scr, 0)
+        if srv_scr and cur_scr == srv_scr:
+            # mất kết nối xong game về màn hình chọn server: nút "Đăng nhập" (3) đọc acc/pass vừa nạp vào loginScr & Rms
+            return self.perform_action(srv_scr, 3, 0)
         if login_scr:
             return self.call_fn(RVA_LOGIN_DO_LOGIN, login_scr, 0)
         if srv_scr:
@@ -1217,50 +1267,139 @@ class GameMemory:
                     return it, tid, name
         return 0, -1, ""
 
-    def use_bag_item(self, slot_idx):
-        """Sử dụng 1 món đồ tại ô slot_idx trong hành trang (gọi Action 2001 trên Panel)"""
-        with self.call_lock:
-            bh, dd_st, main_st = self.statics("bh"), self.statics("dd"), self.statics("Main")
-            if not (bh and dd_st and main_st):
-                return False
-            me = self.ptr(bh + 0xA8)
-            panel = self.ptr(dd_st + 0xD8)
-            msgdlg = self.ptr(dd_st + 0x108)
-            if not (me and panel and msgdlg):
-                return False
-            bag = self.ptr(me + 0x250)
-            it = self.ptr(bag + 0x20 + 8 * slot_idx) if bag else 0
-            if not it:
-                return False
+    def is_panel_open(self):
+        """Kiểm tra Panel cửa hàng/hành trang có đang mở hay không"""
+        dd_st = self.statics("dd")
+        if not dd_st:
+            return False
+        for off in (0xD8, 0xE0):
+            panel = self.ptr(dd_st + off)
+            if panel and self.read(panel + 0x10, 1) != b"\x00":
+                return True
+        return False
 
-            body = self.ptr(me + 0x260)
-            body_len = self.num(body + 0x18, "<i") if body else 10
-            cmd = self.gadget_cmd(msgdlg)
-            if not cmd:
-                return False
+    def hide_panels(self):
+        """Đóng các Panel đang mở trên màn hình"""
+        dd_st = self.statics("dd")
+        if not dd_st:
+            return False
+        closed = False
+        for off in (0xD8, 0xE0):
+            panel = self.ptr(dd_st + off)
+            if panel and self.read(panel + 0x10, 1) != b"\x00":
+                self.call_fn(RVA_PANEL_HIDE, panel, 0)
+                closed = True
+        return closed
 
-            old_page = self.num(panel + 0x238, "<i")
-            old_sel = self.num(panel + 0x230, "<i")
-            self.write(panel + 0x238, struct.pack("<i", 0))
-            self.write(panel + 0x230, struct.pack("<i", slot_idx + body_len + 1))
-            self.write(cmd + 0x90, struct.pack("<Q", 0))
-            self.write(cmd + 0x30, struct.pack("<Q", panel))
-            self.write(cmd + 0x38, struct.pack("<i", 2001))
-            self.write(dd_st + 0x100, struct.pack("<Q", msgdlg))
-            self.write(main_st + 0x4C, struct.pack("<i", 1))
-
-            t0 = time.monotonic()
-            ok = False
-            while time.monotonic() - t0 < 1.0:
-                if self.num(main_st + 0x4C, "<i") == 0:
-                    ok = True
+    def buy_shop_item(self, it_shop, retry=0):
+        """Mua 1 vật phẩm it_shop trong cửa hàng đang mở qua Panel.perform (3000/3001/3004)"""
+        if not it_shop:
+            return False
+        dd_st = self.statics("dd")
+        panel = self.ptr(dd_st + 0xD8) if dd_st else 0
+        if not panel:
+            return False
+        buy_spec = self.num(it_shop + 0x40, "<q")
+        buy_coin = self.num(it_shop + 0x54, "<i")
+        buy_gold = self.num(it_shop + 0x5C, "<i")
+        if buy_spec != 0:
+            actions = [3004, 3000, 3001]
+        elif buy_coin > 0 and buy_gold <= 0:
+            actions = [3000, 3004, 3001]
+        elif buy_gold > 0 and buy_coin <= 0:
+            actions = [3001, 3004, 3000]
+        else:
+            actions = [3004, 3000, 3001]
+        act = actions[retry % len(actions)]
+        ok = self.perform_action(panel, act, it_shop)
+        if ok:
+            t_wait = time.monotonic()
+            while time.monotonic() - t_wait < 0.25:
+                if self.confirm_msgdlg_if_open():
                     break
-                time.sleep(0.015)
-            self.write(panel + 0x238, struct.pack("<i", old_page))
-            self.write(panel + 0x230, struct.pack("<i", old_sel))
-            self.write(cmd + 0x38, struct.pack("<i", 0))
-            self.write(dd_st + 0x100, struct.pack("<Q", 0))
-            return ok
+                time.sleep(0.03)
+        return ok
+
+    def confirm_msgdlg_if_open(self):
+        """Nếu đang có hộp thoại xác nhận (msgdlg) trên màn hình thì bấm nút xác nhận/đóng"""
+        dd_st = self.statics("dd")
+        if not dd_st:
+            return False
+        cur_dlg = self.ptr(dd_st + 0x100)
+        msgdlg = self.ptr(dd_st + 0x108)
+        if not (cur_dlg and msgdlg and cur_dlg == msgdlg):
+            return False
+        for cmd_off in (0x10, 0x18):
+            cmd = self.ptr(msgdlg + cmd_off)
+            if cmd:
+                id_act = self.num(cmd + 0x38, "<i")
+                listener = self.ptr(cmd + 0x30)
+                p_obj = self.ptr(cmd + 0x70)
+                if id_act > 0 and listener:
+                    return self.perform_action(listener, id_act, p_obj)
+        self.write(dd_st + 0x100, struct.pack("<Q", 0))
+        return True
+
+    def use_bag_item(self, slot_idx):
+        """Sử dụng 1 món đồ tại ô slot_idx trong hành trang (ưu tiên gọi RVA_USE_ITEM_BY_TID trực tiếp)"""
+        if slot_idx < 0:
+            return False
+        self.close_menu()
+        self.hide_panels()
+        bh, dd_st, main_st = self.statics("bh"), self.statics("dd"), self.statics("Main")
+        if not (bh and dd_st and main_st):
+            return False
+        me = self.ptr(bh + 0xA8)
+        bag = self.ptr(me + 0x250) if me else 0
+        it = self.ptr(bag + 0x20 + 8 * slot_idx) if bag else 0
+        if not it:
+            return False
+        tpl = self.ptr(it + 0x18)
+        tid = self.num(tpl + 0x10, "<h") if tpl else -1
+        ok = False
+        if tid >= 0:
+            ok = self.call_fn(RVA_USE_ITEM_BY_TID, tid & 0xFFFFFFFF, 0)
+        if not ok:
+            with self.call_lock:
+                panel = self.ptr(dd_st + 0xD8)
+                msgdlg = self.ptr(dd_st + 0x108)
+                if not (panel and msgdlg):
+                    return False
+                body = self.ptr(me + 0x260)
+                body_len = self.num(body + 0x18, "<i") if body else 10
+                cmd = self.gadget_cmd(msgdlg)
+                if not cmd:
+                    return False
+                old_page = self.num(panel + 0x238, "<i")
+                old_sel = self.num(panel + 0x230, "<i")
+                self.write(panel + 0x238, struct.pack("<i", 0))
+                self.write(panel + 0x230, struct.pack("<i", slot_idx + body_len + 1))
+                self.write(cmd + 0x90, struct.pack("<Q", 0))
+                self.write(cmd + 0x30, struct.pack("<Q", panel))
+                self.write(cmd + 0x38, struct.pack("<i", 2001))
+                self.write(dd_st + 0x100, struct.pack("<Q", msgdlg))
+                self.write(main_st + 0x4C, struct.pack("<i", 1))
+                t0 = time.monotonic()
+                while time.monotonic() - t0 < 1.0:
+                    if self.num(main_st + 0x4C, "<i") == 0:
+                        ok = True
+                        break
+                    time.sleep(0.015)
+                self.write(panel + 0x238, struct.pack("<i", old_page))
+                self.write(panel + 0x230, struct.pack("<i", old_sel))
+                self.write(cmd + 0x38, struct.pack("<i", 0))
+                self.write(dd_st + 0x100, struct.pack("<Q", 0))
+        if ok:
+            t_wait = time.monotonic()
+            while time.monotonic() - t_wait < 0.55:
+                if self.confirm_msgdlg_if_open():
+                    break
+                caps = self.read_current_menu()
+                if caps and any(w in caps[0] for w in ("đồng ý", "dong y", "ok", "xác nhận", "xac nhan")):
+                    self.select_menu_option(0)
+                    break
+                time.sleep(0.03)
+        return ok
 
     def read_current_menu(self):
         """Đọc danh sách các mục (text) của menu đang hiển thị (nếu có)"""
@@ -1273,11 +1412,22 @@ class GameMemory:
         for c in items:
             sub = [x for x in self.str_array(self.ptr(c + 0x28)) if x]
             txt = norm_str(" ".join(sub) if sub else self.string(c + 0x20))
-            caps.append(txt)
+            caps.append(txt.replace("\n", " "))
         return caps
 
+    def close_menu(self):
+        """Đóng menu đang hiển thị mà không kích hoạt chọn mục"""
+        dd_st = self.statics("dd")
+        menu = self.ptr(dd_st + 0xD0) if dd_st else 0
+        if not menu or self.read(menu + 0x10, 1) == b"\x00":
+            return False
+        self.write(menu + 0x85, b"\x00")
+        self.write(menu + 0x84, b"\x00")
+        self.call_fn(RVA_MENU_CLOSE, menu, 0)
+        return True
+
     def select_menu_option(self, pick_index):
-        """Chọn option pick_index trong menu đang hiển thị và kích hoạt callback"""
+        """Chọn option pick_index trong menu đang hiển thị và kích hoạt callback qua Menu.doCloseMenu (menu+0x84 = 1)"""
         dd_st = self.statics("dd")
         menu = self.ptr(dd_st + 0xD0) if dd_st else 0
         if not menu or self.read(menu + 0x10, 1) == b"\x00":
@@ -1391,6 +1541,11 @@ class GameMemory:
         for key, (cls, off) in FLAGS.items():
             st = self.statics(cls)
             s["flags"][key] = bool(self.read(st + off, 1)[0]) if st else None
+        dd_st = self.statics("dd")
+        cur_scr = self.ptr(dd_st + 0xC8) if dd_st else 0
+        login_scr = self.ptr(dd_st + 0xF0) if dd_st else 0
+        srv_scr = self.ptr(dd_st + 0x398) if dd_st else 0
+        s["onLoginScr"] = bool(cur_scr and login_scr and cur_scr == login_scr)
         bh, jb = self.statics("bh"), self.statics("jb")
         me = self.ptr(bh + 0xA8) if bh else 0
         if not me or not jb:
@@ -1400,14 +1555,11 @@ class GameMemory:
             return s
         bag_used, skh_count, junk_slots, coffin_count, capsule_count = self.scan_bag(me)
         q = self.read_quest_info(me)
-        dd_st = self.statics("dd")
-        cur_scr = self.ptr(dd_st + 0xC8) if dd_st else 0
-        s["offline"] = bool(cur_scr) and cur_scr in (self.ptr(dd_st + 0xF0), self.ptr(dd_st + 0x398))
+        s["offline"] = bool(cur_scr) and cur_scr in (login_scr, srv_scr)
         fg_st = self.statics("fg")
         mju = self.ptr(fg_st + 0x28) if fg_st else 0
         if mju and self.num(mju + 0x28, "<i") == self.num(me + 0x90, "<i"):  # chỉ tin khi gắn đúng id nhân vật đang chơi
             s["boundUser"] = self.string(mju + 0x20).strip()
-        login_scr = self.ptr(dd_st + 0xF0) if dd_st else 0
         if login_scr and not s["offline"]:
             # ô Tài khoản / Mật khẩu của CHÍNH tab này: game chỉ nạp từ Rms chung ngay trước lúc đăng nhập (eq.cgi),
             # nên khi đã vào game thì đây đúng là tài khoản tab vừa dùng
@@ -1563,7 +1715,7 @@ class BossHunter:
         self.coffin_shop_ready = False
         # Trạng thái Auto Ấp Trứng & Mua Đá Linh Lực
         self.egg_active = False
-        self.egg_phase = "INIT"         # INIT, SPEEDUP, BUY_STONE, HATCH, BUY_EGG, USE_EGG
+        self.egg_phase = "INIT"         # INIT, SPEEDUP, BUY_STONE, HATCH, BUY_EGG, USE_EGG, RELOAD_MAP
         self.egg_phase_t = 0.0
         self.egg_delay = 120            # ms
         self.egg_days_reduced = 0
@@ -1576,6 +1728,12 @@ class BossHunter:
         self.egg_status_text = "Đang dừng"
         self.egg_last_action_at = 0.0
         self.egg_single_action = None
+        self.egg_shop_opened = False
+        self.egg_buy_tries = 0
+        self.egg_stone_needed = 30
+        self.egg_home_map = MAP_ID_NHA_BUNMA
+        self.egg_visited_sieu_thi = False
+        self.egg_reload_started_at = 0.0
 
     def log(self, msg):
         bh = self.mem.statics("bh")
@@ -1783,12 +1941,19 @@ class BossHunter:
         self.egg_auto_use_egg = bool(use_egg)
         self.egg_phase = "INIT"
         self.egg_phase_t = time.monotonic() * 1000.0
+        self.egg_shop_opened = False
+        self.egg_buy_tries = 0
+        self.egg_visited_sieu_thi = False
+        self.egg_reload_started_at = 0.0
         self.egg_status_text = "Đang chạy" if enabled else "Đã dừng"
         self.log(f"{'BẬT' if enabled else 'TẮT'} Auto Ấp Trứng & Mua Đá Linh Lực (delay={self.egg_delay}ms)")
 
     def stop_egg_auto(self, reason="Đã dừng Auto Ấp Trứng"):
         self.egg_active = False
         self.egg_single_action = None
+        self.egg_shop_opened = False
+        self.egg_buy_tries = 0
+        self.egg_visited_sieu_thi = False
         self.egg_status_text = "Đã dừng"
         self.log(reason)
 
@@ -1807,20 +1972,55 @@ class BossHunter:
         self.egg_phase_t = time.monotonic() * 1000.0
         self.log("Bấm nở trứng (1 lần)...")
 
+    def find_egg_npc(self):
+        """Tìm NPC Trứng trong ổ ấp ở map hiện tại (hỗ trợ cả Trứng Mabu ID 50 tại Nhà Bunma và Trứng Linh Thú ID 80)"""
+        for tpl_id in EGG_INCUBATOR_NPC_IDS:
+            npc = self.find_npc(tpl_id)
+            if npc:
+                return npc, tpl_id
+        return 0, -1
+
+    def find_egg_shop_npc(self):
+        """Tìm NPC bán Trứng & Đá Linh Lực ở map hiện tại (hỗ trợ cả Bunma ID 37 tại Nhà Bunma và Thần mèo Karin ID 18)"""
+        for tpl_id in EGG_SHOP_NPC_IDS:
+            npc = self.find_npc(tpl_id)
+            if npc:
+                return npc, tpl_id
+        return 0, -1
+
+    def interact_egg_npc(self):
+        _, tpl_id = self.find_egg_npc()
+        if tpl_id < 0:
+            return False
+        return self.interact_npc(tpl_id)
+
+    def interact_egg_shop_npc(self):
+        _, tpl_id = self.find_egg_shop_npc()
+        if tpl_id < 0:
+            return False
+        return self.interact_npc(tpl_id)
+
     def interact_npc(self, npc_tpl_id):
+        self.close_dialogs()
+        self.mem.hide_panels()
+        self.mem.close_menu()
         bh_st = self.mem.statics("bh")
         me = self.mem.ptr(bh_st + 0xA8) if bh_st else 0
         npc = self.find_npc(npc_tpl_id)
-        if npc and me:
-            nx = self.mem.num(npc + 0x6C, "<i")
-            ny = self.mem.num(npc + 0x70, "<i")
-            mx = self.mem.num(me + 0x6C, "<i")
-            my = self.mem.num(me + 0x70, "<i")
-            if abs(mx - nx) > 50 or abs(my - ny) > 50:
-                self.mem.call_fn(RVA_TELEPORT, nx, (ny - 1) & 0xFFFFFFFF)
-            self.mem.call_fn(RVA_FOCUS_TO, me, npc)
+        if not npc or not me:
+            return False
+        nx = self.mem.num(npc + 0x6C, "<i")
+        ny = self.mem.num(npc + 0x70, "<i")
+        mx = self.mem.num(me + 0x6C, "<i")
+        my = self.mem.num(me + 0x70, "<i")
         hx_st = self.mem.statics("hx")
         svc = self.mem.ptr(hx_st) if hx_st else 0
+        if abs(mx - nx) > 50 or abs(my - ny) > 50:
+            self.mem.call_fn(RVA_TELEPORT, nx, (ny - 1) & 0xFFFFFFFF)
+            time.sleep(0.18)  # chờ server nhận vị trí charMove mới trước khi gửi openMenu
+        elif svc:
+            self.mem.call_fn(RVA_CHAR_MOVE, svc, 0)
+        self.mem.call_fn(RVA_FOCUS_TO, me, npc)
         if svc:
             self.mem.call_fn(RVA_OPEN_NPC_MENU, svc, npc_tpl_id & 0xFFFFFFFF)
             return True
@@ -1831,6 +2031,10 @@ class BossHunter:
             return False
 
         if now - self.egg_last_action_at < self.egg_delay:
+            return True
+
+        if self.close_dialogs() or self.mem.confirm_msgdlg_if_open():
+            self.egg_last_action_at = now + 200
             return True
 
         da_ll, _ = self.mem.count_bag_item(me, ITEM_ID_DA_LINH_LUC)
@@ -1844,7 +2048,7 @@ class BossHunter:
                 if caps:
                     pick = -1
                     for idx, c in enumerate(caps):
-                        if "99 đá linh lực" in c or "đá linh lực" in c:
+                        if "99 đá linh lực" in c or "đá linh lực" in c or "da linh luc" in c:
                             pick = idx
                             break
                     if pick >= 0:
@@ -1852,86 +2056,257 @@ class BossHunter:
                         self.egg_stones_bought += 99
                         self.log("Đã mua 99 Đá Linh Lực thành công!")
                         self.egg_single_action = None
-                        self.egg_last_action_at = now + 400
+                        self.egg_last_action_at = now + 450
                         return True
-                self.interact_npc(NPC_ID_KARIN)
-                self.egg_last_action_at = now + 300
+                    self.mem.close_menu()
+                    self.egg_last_action_at = now + 200
+                    return True
+                if not self.interact_egg_shop_npc():
+                    self.log("Không tìm thấy NPC Bunma / Karin ở map hiện tại!")
+                    self.egg_single_action = None
+                self.egg_last_action_at = now + 450
                 return True
 
             elif act == "SPEEDUP":
                 if caps:
+                    # Bước xác nhận cuối ('ok', 'từ chối') sau khi bấm '30 Đá LL +3 TV 1 ngày'
+                    if caps[0] == "ok" and not any("cửa hàng" in x or "cua hang" in x for x in caps):
+                        self.mem.select_menu_option(0)
+                        self.egg_days_reduced += 1
+                        self.log("Đã truyền linh lực giảm 1 ngày thành công!")
+                        self.egg_single_action = None
+                        self.egg_last_action_at = now + 350
+                        return True
                     pick = -1
                     for idx, c in enumerate(caps):
-                        if "1 ngày" in c or "30 đá ll" in c:
+                        if any(w in c for w in ["1 ngày", "1 ngay", "30 đá ll", "30 da ll", "30 đá linh lực"]):
                             pick = idx
                             break
                     if pick >= 0:
                         self.mem.select_menu_option(pick)
-                        self.egg_days_reduced += 1
-                        self.log("Đã truyền linh lực giảm 1 ngày thành công!")
-                        self.egg_single_action = None
-                        self.egg_last_action_at = now + 300
+                        self.egg_last_action_at = now + 350
                         return True
-                self.interact_npc(NPC_ID_EGG)
-                self.egg_last_action_at = now + 300
+                    inter = -1
+                    for idx, c in enumerate(caps):
+                        if any(w in c for w in ["truyền linh lực", "truyen linh luc", "tăng tốc", "tang toc", "ấp nhanh"]):
+                            inter = idx
+                            break
+                    if inter >= 0:
+                        self.mem.select_menu_option(inter)
+                        self.egg_last_action_at = now + 350
+                        return True
+                    self.mem.close_menu()
+                    self.egg_last_action_at = now + 200
+                    return True
+                if not self.interact_egg_npc():
+                    self.log("Không tìm thấy Trứng Linh Thú ở map hiện tại!")
+                    self.egg_single_action = None
+                self.egg_last_action_at = now + 450
                 return True
 
             elif act == "HATCH":
                 if caps:
                     pick = -1
                     for idx, c in enumerate(caps):
-                        if any(w in c for w in ["nở", "no", "nhận", "nhan", "hoàn thành"]):
+                        if any(w in c for w in ["nở trứng", "no trung", "nở", "nhận", "nhan", "hoàn thành", "ấp trứng xong"]):
                             pick = idx
                             break
                     if pick >= 0:
+                        is_first_hatch_menu = any("hủy bỏ" in x or "huy bo" in x for x in caps)
                         self.mem.select_menu_option(pick)
+                        if is_first_hatch_menu:
+                            self.egg_last_action_at = now + 350
+                            return True
                         self.egg_hatched_count += 1
                         self.log("Đã nở trứng thành công!")
                         self.egg_single_action = None
-                        self.egg_last_action_at = now + 400
+                        self.egg_last_action_at = now + 600
                         return True
-                self.interact_npc(NPC_ID_EGG)
-                self.egg_last_action_at = now + 300
+                    self.mem.close_menu()
+                    self.egg_last_action_at = now + 200
+                    return True
+                if not self.interact_egg_npc():
+                    self.log("Không tìm thấy Trứng Linh Thú ở map hiện tại!")
+                    self.egg_single_action = None
+                self.egg_last_action_at = now + 450
                 return True
 
         # ---- XỬ LÝ TOÀN BỘ VÒNG LẶP AUTO CHÍNH ----
         caps = self.mem.read_current_menu()
 
+        # 0. Khi đang trong pha RELOAD_MAP (sang Siêu Thị rồi quay lại Nhà Bunma để load trứng): xác nhận menu 'đồng ý' nếu còn, đóng menu cản đường
+        if self.egg_phase == "RELOAD_MAP":
+            if caps:
+                confirm_pick = -1
+                for idx, c in enumerate(caps):
+                    if any(w in c for w in ("đồng ý", "dong y", "xác nhận", "xac nhan")):
+                        confirm_pick = idx
+                        break
+                if confirm_pick >= 0:
+                    self.mem.select_menu_option(confirm_pick)
+                    self.egg_last_action_at = now + 350
+                else:
+                    self.mem.close_menu()
+                    self.egg_last_action_at = now + 150
+                return True
+            self.mem.hide_panels()
+            if not self.egg_visited_sieu_thi:
+                if cur_map == MAP_ID_SIEU_THI:
+                    self.egg_visited_sieu_thi = True
+                    self.mem.call_fn(RVA_XMAP_STOP, 0, 0)
+                    self.egg_status_text = "Quay lại Nhà Bunma..."
+                    self.log("Đã sang map Siêu Thị -> Quay trở lại Nhà Bunma để ấp trứng...")
+                    self.egg_last_action_at = now + 700
+                    return True
+                # Nếu ở map khác (vd unit test không có waypoint sang Siêu Thị) mà trứng đã xuất hiện ngay trong ổ ấp
+                if cur_map != MAP_ID_NHA_BUNMA and self.find_egg_npc()[0]:
+                    self.egg_phase = "SPEEDUP"
+                    self.egg_last_action_at = now + 200
+                    return True
+                self.egg_status_text = "Sang map Siêu Thị..."
+                if not self.go_waypoint("phải"):
+                    if self.find_egg_npc()[0]:
+                        self.egg_phase = "SPEEDUP"
+                        self.egg_last_action_at = now + 200
+                        return True
+                self.egg_last_action_at = now + 800
+                return True
+            else:
+                if cur_map == self.egg_home_map or cur_map == MAP_ID_NHA_BUNMA:
+                    if self.find_egg_npc()[0]:
+                        self.log("Đã quay lại Nhà Bunma, phát hiện Trứng trong ổ ấp -> Bắt đầu ấp trứng nhanh!")
+                        self.egg_phase = "SPEEDUP"
+                        self.egg_status_text = "Bắt đầu ấp trứng nhanh"
+                        self.egg_last_action_at = now + 300
+                        return True
+                    if now - self.egg_reload_started_at > 12000:
+                        # Đã về lại Nhà Bunma quá lâu nhưng chưa thấy trứng -> thử sang Siêu Thị lại 1 lần hoặc về SPEEDUP
+                        self.egg_phase = "SPEEDUP"
+                    self.egg_last_action_at = now + 500
+                    return True
+                self.egg_status_text = "Về lại Nhà Bunma..."
+                self.go_waypoint("trái")
+                self.egg_last_action_at = now + 800
+                return True
+
         # 1. Nếu menu đang hiển thị trên màn hình:
         if caps:
-            # 1.1. Menu có nút "Nở trứng" / "Nhận"
+            # 1.1. Khi đang ở pha BUY_EGG: ưu tiên tìm nút "Cửa hàng" (không để mục "99 Đá Linh Lực" của Bunma/Karin cướp quyền)
+            if self.egg_phase == "BUY_EGG":
+                shop_pick = -1
+                for idx, c in enumerate(caps):
+                    if "cửa hàng" in c or "cua hang" in c or "shop" in c:
+                        shop_pick = idx
+                        break
+                if shop_pick >= 0:
+                    self.mem.select_menu_option(shop_pick)
+                    self.egg_shop_opened = True
+                    self.egg_buy_tries = 0
+                    self.egg_status_text = "Mở Cửa hàng tìm Trứng"
+                    self.egg_last_action_at = now + 550
+                    return True
+                confirm_pick = -1
+                for idx, c in enumerate(caps):
+                    if any(w in c for w in ["đồng ý", "dong y", "xác nhận", "xac nhan", "mua"]):
+                        confirm_pick = idx
+                        break
+                if confirm_pick >= 0:
+                    self.mem.select_menu_option(confirm_pick)
+                    self.egg_last_action_at = now + 450
+                    return True
+                self.mem.close_menu()
+                self.egg_last_action_at = now + 200
+                return True
+
+            # 1.2. Khi đang ở pha BUY_STONE: tìm nút "99 Đá Linh Lực" trên menu Bunma / Karin
+            if self.egg_phase == "BUY_STONE":
+                stone_pick = -1
+                for idx, c in enumerate(caps):
+                    if "99 đá linh lực" in c or "đá linh lực" in c or "da linh luc" in c:
+                        stone_pick = idx
+                        break
+                if stone_pick >= 0:
+                    if thoi_vang < 14:
+                        self.stop_egg_auto(f"Hết Thỏi vàng để mua 99 Đá LL (còn {thoi_vang} < 14 TV)")
+                        return True
+                    self.mem.select_menu_option(stone_pick)
+                    self.egg_stones_bought += 99
+                    self.egg_status_text = f"Đã mua {self.egg_stones_bought} Đá LL"
+                    self.log(f"Đã mua 99 Đá Linh Lực (tốn 14 Thỏi vàng). Tổng mua: {self.egg_stones_bought}")
+                    if da_ll + 99 >= self.egg_stone_needed:
+                        self.egg_stone_needed = 30
+                        self.egg_phase = "SPEEDUP"
+                    self.egg_last_action_at = now + 450
+                    return True
+                confirm_pick = -1
+                for idx, c in enumerate(caps):
+                    if any(w in c for w in ["đồng ý", "dong y", "xác nhận", "xac nhan"]):
+                        confirm_pick = idx
+                        break
+                if confirm_pick >= 0:
+                    self.mem.select_menu_option(confirm_pick)
+                    self.egg_last_action_at = now + 400
+                    return True
+                self.mem.close_menu()
+                self.egg_last_action_at = now + 200
+                return True
+
+            # 1.3. Menu có nút "Nở" / "Nở trứng" / "Nhận" (hỗ trợ menu 2 bước: ['nở', 'hủy bỏ trứng'] -> ['nở', 'từ chối'], cần >= 200 Đá LL)
             hatch_pick = -1
             for idx, c in enumerate(caps):
-                if any(w in c for w in ["nở trứng", "no trung", "nhận", "nhan", "ấp trứng xong"]):
+                if any(w in c for w in ["nở trứng", "no trung", "nở", "nhận", "nhan", "hoàn thành", "ấp trứng xong"]):
                     hatch_pick = idx
                     break
             if hatch_pick >= 0:
+                if da_ll < 200:
+                    if self.egg_auto_buy_stone:
+                        self.mem.close_menu()
+                        self.egg_stone_needed = 200
+                        self.egg_phase = "BUY_STONE"
+                        self.egg_status_text = "Thiếu Đá LL nở trứng -> Mua Đá LL"
+                        self.log(f"Đá Linh Lực còn {da_ll} (< 200 để đánh thức nở trứng) -> Chuyển sang mua 99 Đá LL...")
+                        self.egg_last_action_at = now + 250
+                        return True
+                    else:
+                        self.stop_egg_auto(f"Hết Đá Linh Lực để nở trứng (còn {da_ll} < 200)")
+                        return True
+                is_first_hatch_menu = any("hủy bỏ" in x or "huy bo" in x for x in caps)
                 self.mem.select_menu_option(hatch_pick)
+                if is_first_hatch_menu:
+                    self.egg_status_text = "Xác nhận nở trứng..."
+                    self.egg_last_action_at = now + 380
+                    return True
                 self.egg_hatched_count += 1
                 self.egg_status_text = f"Đã nở quả thứ {self.egg_hatched_count}"
                 self.log(f"Trứng đã nở thành công! (Tổng số trứng đã nở: {self.egg_hatched_count})")
-                self.egg_last_action_at = now + 500
-                if self.egg_auto_buy_egg:
+                self.egg_last_action_at = now + 1500
+                slot, _, _ = self.mem.find_egg_in_bag(me)
+                if slot >= 0 and self.egg_auto_use_egg:
+                    self.egg_phase = "USE_EGG"
+                elif self.egg_auto_buy_egg:
                     self.egg_phase = "BUY_EGG"
+                    self.egg_shop_opened = False
+                    self.egg_buy_tries = 0
+                elif self.egg_auto_use_egg:
+                    self.egg_phase = "USE_EGG"
                 else:
                     self.stop_egg_auto("Trứng đã nở xong!")
                 return True
 
-            # 1.2. Menu có nút "1 ngày" (Menu Trứng)
+            # 1.4. Menu có nút "1 ngày" (Menu Trứng bước 2: '30 đá ll +3 tv 1 ngày')
             speedup_pick = -1
             for idx, c in enumerate(caps):
-                if "1 ngày" in c or "30 đá ll" in c:
+                if any(w in c for w in ["1 ngày", "1 ngay", "30 đá ll", "30 da ll", "30 đá linh lực"]):
                     speedup_pick = idx
                     break
             if speedup_pick >= 0:
                 # Kiểm tra Đá Linh Lực
                 if da_ll < 30:
                     if self.egg_auto_buy_stone:
-                        # Đóng menu trứng để chuyển sang mua đá ở Karin
-                        self.mem.select_menu_option(len(caps) - 1)  # Từ chối / đóng
+                        self.mem.close_menu()
                         self.egg_phase = "BUY_STONE"
                         self.egg_status_text = "Hết Đá LL -> Mua 99 Đá LL"
-                        self.log(f"Đá Linh Lực còn {da_ll} (< 30) -> Chuyển sang Karin mua 99 Đá LL (14 TV)...")
+                        self.log(f"Đá Linh Lực còn {da_ll} (< 30) -> Chuyển sang mua 99 Đá LL (14 TV)...")
                         self.egg_last_action_at = now + 250
                         return True
                     else:
@@ -1946,63 +2321,104 @@ class BossHunter:
                 self.mem.select_menu_option(speedup_pick)
                 self.egg_days_reduced += 1
                 self.egg_status_text = f"Đang ấp (-{self.egg_days_reduced} ngày)"
-                self.egg_last_action_at = now + self.egg_delay
-                if self.egg_target_days > 0 and self.egg_days_reduced >= self.egg_target_days:
+                self.egg_last_action_at = now + max(self.egg_delay, 280)
+                if self.egg_target_days > 0 and self.egg_days_reduced >= self.egg_target_days and not self.mem.read_current_menu():
                     self.stop_egg_auto(f"Đã hoàn thành mục tiêu giảm {self.egg_days_reduced} ngày!")
                 return True
 
-            # 1.3. Menu có nút "99 Đá Linh Lực" (Menu Karin)
-            stone_pick = -1
+            # 1.5. Menu trung gian / xác nhận (vd: "Truyền linh lực", ['ok', 'từ chối'], "Đồng ý", "Xác nhận")
+            inter_pick = -1
+            is_shop_menu = any("cửa hàng" in x or "cua hang" in x for x in caps)
             for idx, c in enumerate(caps):
-                if "99 đá linh lực" in c or "đá linh lực" in c:
-                    stone_pick = idx
+                if any(w in c for w in ["truyền linh lực", "truyen linh luc", "tăng tốc", "tang toc", "ấp nhanh", "ap nhanh", "đồng ý", "dong y", "xác nhận", "xac nhan"]):
+                    inter_pick = idx
                     break
-            if stone_pick >= 0:
-                if thoi_vang < 14:
-                    self.stop_egg_auto(f"Hết Thỏi vàng để mua 99 Đá LL (còn {thoi_vang} < 14 TV)")
-                    return True
-                self.mem.select_menu_option(stone_pick)
-                self.egg_stones_bought += 99
-                self.egg_status_text = f"Đã mua {self.egg_stones_bought} Đá LL"
-                self.log(f"Đã mua 99 Đá Linh Lực (tốn 14 Thỏi vàng). Tổng mua: {self.egg_stones_bought}")
-                self.egg_phase = "SPEEDUP"
-                self.egg_last_action_at = now + 350
+                if c == "ok" and not is_shop_menu:
+                    inter_pick = idx
+                    break
+            if inter_pick >= 0:
+                self.mem.select_menu_option(inter_pick)
+                self.egg_last_action_at = now + max(self.egg_delay, 280)
                 return True
 
-            # 1.4. Menu có nút "Cửa hàng" (Menu Karin khi cần mua trứng)
-            if self.egg_phase == "BUY_EGG":
-                shop_pick = -1
-                for idx, c in enumerate(caps):
-                    if "cửa hàng" in c or "shop" in c:
-                        shop_pick = idx
-                        break
-                if shop_pick >= 0:
-                    self.mem.select_menu_option(shop_pick)
-                    self.egg_status_text = "Mở Cửa hàng tìm Trứng"
-                    self.egg_last_action_at = now + 400
-                    return True
+            # 1.6. Nếu menu đang mở không khớp mục nào (vd menu Bunma/Karin cũ còn sót): đóng menu
+            self.mem.close_menu()
+            if self.egg_phase == "SPEEDUP":
+                slot, _, _ = self.mem.find_egg_in_bag(me)
+                if slot >= 0 and self.egg_auto_use_egg:
+                    self.egg_phase = "USE_EGG"
+                elif self.egg_auto_buy_egg:
+                    self.egg_phase = "BUY_EGG"
+                    self.egg_shop_opened = False
+                    self.egg_buy_tries = 0
+            self.egg_last_action_at = now + 250
+            return True
 
         # 2. Nếu không có menu nào đang hiển thị:
         if self.egg_phase == "INIT":
-            if da_ll < 30 and self.egg_auto_buy_stone:
-                self.egg_phase = "BUY_STONE"
+            if cur_map == MAP_ID_SIEU_THI:
+                self.egg_home_map = MAP_ID_NHA_BUNMA
+                self.egg_visited_sieu_thi = True
+                self.egg_reload_started_at = now
+                self.egg_phase = "RELOAD_MAP"
+                self.egg_last_action_at = now + 100
+                return True
+            if self.find_egg_npc()[0]:
+                if da_ll < 30 and self.egg_auto_buy_stone:
+                    self.egg_phase = "BUY_STONE"
+                else:
+                    self.egg_phase = "SPEEDUP"
             else:
-                self.egg_phase = "SPEEDUP"
+                slot, _, _ = self.mem.find_egg_in_bag(me)
+                if slot >= 0 and self.egg_auto_use_egg:
+                    self.egg_phase = "USE_EGG"
+                elif self.egg_auto_buy_egg:
+                    self.egg_phase = "BUY_EGG"
+                    self.egg_shop_opened = False
+                    self.egg_buy_tries = 0
+                else:
+                    self.egg_phase = "SPEEDUP"
             self.egg_last_action_at = now + 100
             return True
 
         elif self.egg_phase == "BUY_STONE":
-            if thoi_vang < 14:
-                self.stop_egg_auto(f"Hết Thỏi vàng (cần ít nhất 14 Thỏi vàng để mua 99 Đá LL)")
+            if da_ll >= self.egg_stone_needed:
+                self.egg_stone_needed = 30
+                self.egg_phase = "SPEEDUP"
+                self.egg_last_action_at = now + 100
                 return True
-            self.egg_status_text = "Mở menu Thần mèo Karin"
-            self.interact_npc(NPC_ID_KARIN)
-            self.egg_last_action_at = now + 350
+            if thoi_vang < 14:
+                self.stop_egg_auto("Hết Thỏi vàng (cần ít nhất 14 Thỏi vàng để mua 99 Đá LL)")
+                return True
+            self.egg_status_text = "Mở Bunma/Karin mua Đá LL"
+            if not self.interact_egg_shop_npc():
+                self.egg_status_text = "Chờ gặp Bunma / Karin..."
+                self.egg_last_action_at = now + 800
+                return True
+            self.egg_last_action_at = now + 450
             return True
 
         elif self.egg_phase == "SPEEDUP":
+            if not self.find_egg_npc()[0]:
+                slot, _, name = self.mem.find_egg_in_bag(me)
+                if slot >= 0 and self.egg_auto_use_egg:
+                    self.log(f"Ổ ấp chưa có trứng, phát hiện {name} trong hành trang -> Sử dụng 1 quả trứng...")
+                    self.egg_phase = "USE_EGG"
+                    self.egg_last_action_at = now + 150
+                    return True
+                if self.egg_auto_buy_egg and self.find_egg_shop_npc()[0]:
+                    self.log("Ổ ấp & hành trang chưa có trứng -> Chuyển sang mua 1 Trứng tại Cửa hàng...")
+                    self.egg_phase = "BUY_EGG"
+                    self.egg_shop_opened = False
+                    self.egg_buy_tries = 0
+                    self.egg_last_action_at = now + 150
+                    return True
+                self.egg_status_text = "Chờ Trứng Linh Thú..."
+                self.egg_last_action_at = now + 800
+                return True
             if da_ll < 30:
                 if self.egg_auto_buy_stone:
+                    self.egg_stone_needed = 30
                     self.egg_phase = "BUY_STONE"
                     self.egg_last_action_at = now + 100
                     return True
@@ -2010,33 +2426,47 @@ class BossHunter:
                     self.stop_egg_auto(f"Hết Đá Linh Lực (còn {da_ll} < 30)")
                     return True
             self.egg_status_text = f"Mở Trứng Linh thú (-{self.egg_days_reduced} ngày)"
-            self.interact_npc(NPC_ID_EGG)
-            self.egg_last_action_at = now + 250
+            self.interact_egg_npc()
+            self.egg_last_action_at = now + 400
             return True
 
         elif self.egg_phase == "BUY_EGG":
             slot, tid, name = self.mem.find_egg_in_bag(me)
             if slot >= 0:
-                self.log(f"Trong hành trang đã có sẵn {name} (ô {slot}) -> Chuyển sang Sử dụng trứng...")
+                self.mem.hide_panels()
+                self.egg_shop_opened = False
+                self.egg_buy_tries = 0
+                self.log(f"Trong hành trang đã có {name} (ô {slot}) -> Chuyển sang Sử dụng 1 quả trứng...")
                 self.egg_phase = "USE_EGG"
-                self.egg_last_action_at = now + 200
+                self.egg_last_action_at = now + 250
                 return True
 
-            it_shop, tid_shop, name_shop = self.mem.find_egg_in_shop(me)
-            if it_shop and tid_shop > 0:
-                self.log(f"Tìm thấy {name_shop} (ID {tid_shop}) trong Cửa hàng -> Đang mua...")
-                self.mem.start_coffin_autobuy(threads=1, qty_per_thread=1, delay_ms=100, item_id=tid_shop)
-                dd_st = self.mem.statics("dd")
-                panel = self.mem.ptr(dd_st + 0xD8) if dd_st else 0
-                if panel:
-                    self.mem.call_fn(RVA_PANEL_HIDE, panel, 0)
-                self.egg_phase = "USE_EGG"
-                self.egg_last_action_at = now + 500
+            if self.egg_shop_opened or self.mem.is_panel_open():
+                it_shop, tid_shop, name_shop = self.mem.find_egg_in_shop(me)
+                if it_shop and tid_shop > 0:
+                    self.log(f"Tìm thấy {name_shop} (ID {tid_shop}) trong Cửa hàng -> Đang mua 1 quả...")
+                    self.egg_status_text = f"Đang mua {name_shop}..."
+                    self.mem.buy_shop_item(it_shop, retry=self.egg_buy_tries)
+                    self.egg_buy_tries += 1
+                    if self.egg_buy_tries >= 4:
+                        self.egg_shop_opened = False
+                        self.egg_buy_tries = 0
+                    self.egg_last_action_at = now + 750
+                    return True
+                self.egg_buy_tries += 1
+                if self.egg_buy_tries < 3:
+                    self.egg_last_action_at = now + 350
+                    return True
+                self.egg_shop_opened = False
+                self.egg_buy_tries = 0
+
+            self.egg_status_text = "Mở Cửa hàng mua Trứng"
+            if not self.interact_egg_shop_npc():
+                self.egg_status_text = "Chờ gặp Bunma / Karin..."
+                self.egg_last_action_at = now + 800
                 return True
-            else:
-                self.interact_npc(NPC_ID_KARIN)
-                self.egg_last_action_at = now + 350
-                return True
+            self.egg_last_action_at = now + 500
+            return True
 
         elif self.egg_phase == "USE_EGG":
             if not self.egg_auto_use_egg:
@@ -2044,17 +2474,31 @@ class BossHunter:
                 return True
             slot, tid, name = self.mem.find_egg_in_bag(me)
             if slot >= 0:
-                self.log(f"Đang sử dụng {name} từ hành trang (ô {slot}) vào ổ ấp...")
+                self.egg_status_text = f"Dùng 1 {name} vào ổ ấp"
+                self.log(f"Đang sử dụng 1 {name} từ hành trang (ô {slot})...")
                 if self.mem.use_bag_item(slot):
-                    self.log(f"Đã đặt {name} vào ổ ấp thành công! Tiếp tục ấp trứng...")
-                    self.egg_phase = "SPEEDUP"
-                    self.egg_last_action_at = now + 600
+                    self.log(
+                        f"Đã dùng 1 {name}! Sang map Siêu Thị rồi quay lại Nhà Bunma để load trứng và bắt đầu ấp..."
+                    )
+                    self.egg_home_map = cur_map if cur_map > 0 else MAP_ID_NHA_BUNMA
+                    self.egg_visited_sieu_thi = False
+                    self.egg_reload_started_at = now
+                    self.egg_phase = "RELOAD_MAP"
+                    self.egg_status_text = "Sang Siêu Thị load trứng..."
+                    self.egg_last_action_at = now + 500
                     return True
                 else:
-                    self.egg_last_action_at = now + 400
+                    self.egg_last_action_at = now + 450
                     return True
             else:
-                self.egg_phase = "BUY_EGG"
+                if self.find_egg_npc()[0]:
+                    self.egg_phase = "SPEEDUP"
+                elif self.egg_auto_buy_egg:
+                    self.egg_phase = "BUY_EGG"
+                    self.egg_shop_opened = False
+                    self.egg_buy_tries = 0
+                else:
+                    self.stop_egg_auto("Không còn trứng trong hành trang!")
                 self.egg_last_action_at = now + 300
                 return True
 
@@ -2812,8 +3256,13 @@ class BossHunter:
         wx, max_x, max_y = min_x(w), self.mem.num(w + 0x14, "<h"), self.mem.num(w + 0x16, "<h")
         x = 15 if max_x < 60 else (wx + 30 if wx <= width - 60 else width - 15)
         self.mem.call_fn(RVA_TELEPORT, x, max_y)
-        time.sleep(0.3)  # server nhận vị trí mới (charMove) trước khi xin đổi map
-        self.mem.call_fn(RVA_REQUEST_CHANGE_MAP, svc, 0)
+        time.sleep(0.25)  # server nhận vị trí mới (charMove) trước khi xin đổi map
+        pop = self.mem.ptr(w + 0x20)
+        cmd = self.mem.ptr(pop + 0x40) if pop else 0
+        if cmd:
+            self.mem.call_fn(RVA_CMD_PERFORM, cmd, 0)
+        else:
+            self.mem.call_fn(RVA_REQUEST_CHANGE_MAP, svc, 0)
         return True
 
     def map_id_by_name(self, name):
@@ -3005,9 +3454,16 @@ class BossHunter:
             info = self.char_info(c)
             if info["id"] >= 0 or info["hp"] <= 0:
                 continue
-            if self.is_member(self.cluster, info["name"]):
+            n = norm_str(info["name"])
+            info["minion"] = any(member_matches(mm, n) for mm in cluster_minions(self.cluster))
+            if info["minion"] or self.is_member(self.cluster, info["name"]):
                 out.append((c, info))
         return out
+
+    @staticmethod
+    def fight_order(bosses):
+        """Thứ tự đánh: boss con (minions) trước, rồi boss đang đánh mình (pk 5)"""
+        return sorted(bosses, key=lambda x: (not x[1].get("minion"), not x[1]["pk"] == 5))
 
     def zone_list(self):
         dg_st = self.mem.statics("dg")
@@ -3468,8 +3924,7 @@ class BossHunter:
                 self.release_target()
                 self.set_state("FLEE", f"HP còn {my_pct:.0f}%, đổi khu chạy trốn")
                 return
-            bosses.sort(key=lambda x: -(x[1]["pk"] == 5))
-            c, info = bosses[0]
+            c, info = self.fight_order(bosses)[0]
             self.target_name = info["name"]
             if now - self.last_fight_log > 4000:
                 self.last_fight_log = now
@@ -3548,6 +4003,7 @@ class Game:
         self.pending_login = pending_login
         self.account = (pending_login["user"], pending_login.get("pass", "")) if pending_login and pending_login.get("user") else None
         self.account_trusted = bool(self.account)  # tài khoản do bảng đăng nhập / nhận theo tên nhân vật, không đoán từ Rms chung
+        self.last_char_name = ""
         self.reconnect = True  # Tự kết nối lại khi mất kết nối (bảng tự đăng nhập đúng tài khoản của tab này)
         self.reconnect_wait = 5.0
         self.last_reconnect_try = 0.0
@@ -3637,6 +4093,7 @@ class PanelApp:
             self.tree.heading(c, text=h)
             self.tree.column(c, width=w, anchor="w" if c in ("name", "map", "quest", "boss", "flags") else "center")
         self.tree.pack(fill="x", padx=6)
+        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
 
         bar = ttk.Frame(root, padding=(6, 4))
         bar.pack(fill="x")
@@ -3950,7 +4407,8 @@ class PanelApp:
                         g.mem.set_flag("al", False)
                         g.status["flags"]["al"] = False
                     if (g.status.get("flags") or {}).get("al"):
-                        g.mem.ensure_auto_login_bound()
+                        u, p = g.account if (g.account_trusted and g.account) else (None, None)
+                        g.mem.ensure_auto_login_bound(u, p)
                     coffin_busy = g.boss.coffin_active and g.boss.coffin_phase in ("INIT", "TRAVEL", "OPEN_SHOP", "CHECK_TIME", "BURST")
                     if g.hidden:
                         g.mem.set_fps(60 if coffin_busy else g.hidden_fps)
@@ -3980,6 +4438,11 @@ class PanelApp:
                             g.mem.login_now(u, pw)
                             if g.pending_login["tries"] >= 10:
                                 g.pending_login = None
+                    elif g.status.get("onLoginScr"):
+                        # Người chơi đang mở màn hình Đổi tài khoản (LoginScr): không tự đăng nhập đè tài khoản cũ,
+                        # đồng thời xoá trạng thái tài khoản cũ của cửa sổ này để nhận tài khoản mới khi vào game
+                        g.account, g.account_trusted = None, False
+                        g.last_reconnect_try = now
                     elif g.reconnect and g.account_trusted and g.account and g.account[0]:
                         dup_ready = any(
                             o.pid != g.pid and (o.status or {}).get("ready") and not (o.status or {}).get("offline")
@@ -4104,6 +4567,18 @@ class PanelApp:
     def selected(self):
         return [int(i) for i in self.tree.selection()]
 
+    def on_tree_select(self, _ev=None):
+        pids = self.selected()
+        if not pids:
+            return
+        g = self.games.get(pids[0])
+        if g and g.account and g.account[0]:
+            u, pw = g.account
+            if not pw:
+                pw = (self.cfg.get("accounts") or {}).get(u, "")
+            self.var_user.set(u)
+            self.var_pass.set(pw)
+
     def on_select_account(self, _ev=None):
         u = self.var_user.get().strip()
         pw = (self.cfg.get("accounts") or {}).get(u)
@@ -4160,13 +4635,16 @@ class PanelApp:
             return
         user = self.var_user.get().strip()
         pw = self.var_pass.get().strip()
-        if user:
+        if user and len(pids) == 1:
             self.remember_account(user, pw)
         for pid in pids:
             g = self.games.get(pid)
             if not g:
                 continue
-            u, p = (user, pw) if user else (g.account or ("", ""))
+            if len(pids) > 1 and g.account and g.account[0]:
+                u, p = g.account
+            else:
+                u, p = (user, pw) if user else (g.account or ("", ""))
             if u:
                 g.account, g.account_trusted = (u, p), True
             g.pending_login = {"user": u, "pass": p, "hide": g.hidden, "auto_login": True, "auto_item": g.auto_item, "last_try": time.monotonic(), "tries": 1}
@@ -4302,28 +4780,71 @@ class PanelApp:
         name = (g.status or {}).get("name") or ""
         if not name:
             return
+        prev_name = getattr(g, "last_char_name", "")
+        if prev_name and prev_name != name:
+            # Đổi sang nhân vật khác trên cùng cửa sổ game -> học lại tài khoản theo nhân vật mới
+            g.account, g.account_trusted = None, False
+        g.last_char_name = name
         g.reconnect_wait = 5.0
         char_accs = self.cfg.setdefault("charAccounts", {})
+        accs = self.cfg.setdefault("accounts", {})
+        taken_by_other = {u for ch, u in char_accs.items() if ch != name and u}
         if g.account_trusted and g.account and g.account[0]:
             mapped = char_accs.get(name)
             if not mapped:
-                char_accs[name] = g.account[0]
-                save_config(self.cfg)
-            elif mapped != g.account[0]:
-                # nhân vật này đã biết là của tài khoản khác -> tab đã vào nhầm tài khoản (vd Tự ĐN của MOD đọc Rms chung):
-                # không ghi đè, theo đúng tài khoản thật để kết nối lại không giành nhau với tab kia
-                g.account = (mapped, (self.cfg.get("accounts") or {}).get(mapped, ""))
-            return
+                if g.account[0] not in taken_by_other:
+                    char_accs[name] = g.account[0]
+                    save_config(self.cfg)
+                    if getattr(g, "mem", None) and g.status.get("loginUser") and g.status.get("loginUser") != g.account[0]:
+                        try:
+                            g.mem.sync_login_box(g.account[0], g.account[1])
+                        except OSError:
+                            pass
+                    return
+                # Tài khoản đang giữ thuộc về nhân vật khác -> cửa sổ này đã đổi tài khoản trong game
+                g.account, g.account_trusted = None, False
+            else:
+                if mapped != g.account[0]:
+                    # nhân vật này đã biết là của tài khoản khác -> tab đã vào nhầm tài khoản (vd Tự ĐN của MOD đọc Rms chung):
+                    # không ghi đè, theo đúng tài khoản thật để kết nối lại không giành nhau với tab kia
+                    g.account = (mapped, accs.get(mapped, ""))
+                if getattr(g, "mem", None) and g.status.get("loginUser") and g.status.get("loginUser") != g.account[0]:
+                    try:
+                        g.mem.sync_login_box(g.account[0], g.account[1])
+                    except OSError:
+                        pass
+                return
         login_user = g.status.get("loginUser") or ""
-        user = char_accs.get(name) or g.status.get("boundUser") or login_user
+        login_pass = g.status.get("loginPass") or ""
+        bound_user = g.status.get("boundUser") or ""
+        if login_user in taken_by_other:
+            # Ô loginScr.tfUser đang kẹt tài khoản cũ của nhân vật khác (do vào từ màn hình chọn server / QLTK trước khi vá):
+            # kiểm tra Rms hiện tại nếu là tài khoản mới chưa gán cho ai thì nạp lại vào loginScr
+            rms_u, rms_p = read_rms_login()
+            if rms_u and rms_u not in taken_by_other and getattr(g, "mem", None):
+                try:
+                    g.mem.sync_login_box(rms_u, rms_p)
+                except OSError:
+                    pass
+                login_user, login_pass = rms_u, rms_p
+                g.status["loginUser"], g.status["loginPass"] = rms_u, rms_p
+            else:
+                login_user, login_pass = "", ""
+        if bound_user in taken_by_other:
+            bound_user = ""
+        user = char_accs.get(name) or bound_user or login_user
         if not user:
             return
-        accs = self.cfg.setdefault("accounts", {})
-        pw = accs.get(user) or (g.status.get("loginPass") if user == login_user else "") or ""
+        pw = accs.get(user) or (login_pass if user == login_user else "") or ""
         if pw and not accs.get(user):
             accs[user] = pw  # chỉ lưu vào cấu hình bảng, không ghi Rms chung (ghi Rms là tab khác đọc nhầm)
             save_config(self.cfg)
         g.account, g.account_trusted = (user, pw), True
+        if getattr(g, "mem", None) and g.status.get("loginUser") and g.status.get("loginUser") != user:
+            try:
+                g.mem.sync_login_box(user, pw)
+            except OSError:
+                pass
 
     def skip_boss_selected(self):
         for pid in self.selected():

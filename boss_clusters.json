@@ -54,7 +54,7 @@
     },
     {
       "name": "Fide Đại Ca (Núi Khỉ Vàng)",
-      "enabled": false,
+      "enabled": true,
       "members": [
         "Fide đại ca 1",
         "Fide đại ca 2",
@@ -140,6 +140,9 @@
       "enabled": false,
       "members": [
         "Siêu bọ hung"
+      ],
+      "minions": [
+        "Xên con *"
       ]
     },
     {
@@ -229,7 +232,7 @@
     },
     {
       "name": "Ác Ma Picolo",
-      "enabled": true,
+      "enabled": false,
       "members": [
         "Ác Ma Picolo"
       ]
