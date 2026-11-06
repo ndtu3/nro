@@ -54,7 +54,7 @@
     },
     {
       "name": "Fide Đại Ca (Núi Khỉ Vàng)",
-      "enabled": true,
+      "enabled": false,
       "members": [
         "Fide đại ca 1",
         "Fide đại ca 2",
@@ -89,7 +89,7 @@
     },
     {
       "name": "Android 19 & Dr.Kôrê",
-      "enabled": false,
+      "enabled": true,
       "members": [
         "Android 19",
         "Dr.Kôrê"
@@ -106,7 +106,7 @@
     },
     {
       "name": "Pic Poc King Kong",
-      "enabled": false,
+      "enabled": true,
       "members": [
         "Pic",
         "Poc",
@@ -122,7 +122,7 @@
     },
     {
       "name": "Xên Bọ Hung",
-      "enabled": false,
+      "enabled": true,
       "members": [
         "Xên Bọ Hung *",
         "Xên hoàn thiện"
@@ -130,7 +130,7 @@
     },
     {
       "name": "Xên con",
-      "enabled": false,
+      "enabled": true,
       "members": [
         "Xên con *"
       ]
@@ -180,7 +180,7 @@
     },
     {
       "name": "Black Goku",
-      "enabled": false,
+      "enabled": true,
       "members": [
         "Black Goku",
         "Super Black Goku"
@@ -188,7 +188,7 @@
     },
     {
       "name": "Fusion Zamasu",
-      "enabled": false,
+      "enabled": true,
       "members": [
         "Fusion Zamasu"
       ]

@@ -493,11 +493,18 @@ def cluster_allows_map(c, map_id):
 
 
 # boss con do boss chính sinh ra, phải hạ trước (boss chính bất tử khi còn con) - dùng khi cụm không ghi "minions"
-DEFAULT_MINIONS = {"siêu bọ hung": ["Xên con *"]}
+# boss chính -> boss con nó sinh ra; tra theo tên boss trong cụm (cụm "Xên Bọ Hung" có Xên hoàn thiện), không theo tên cụm
+DEFAULT_MINIONS = {"xên hoàn thiện": ["Xên con *"], "siêu bọ hung": ["Xên con *"]}
 
 
 def cluster_minions(cluster):
-    return cluster.get("minions") or DEFAULT_MINIONS.get(norm_str(cluster.get("name", "")), [])
+    if cluster.get("minions"):
+        return cluster["minions"]
+    out = []
+    for boss, minions in DEFAULT_MINIONS.items():
+        if any(member_matches(m, boss) for m in cluster.get("members", [])):
+            out += [x for x in minions if x not in out]
+    return out
 
 
 def member_matches(m, name_norm):
@@ -3480,8 +3487,10 @@ class BossHunter:
         zones = self.zone_list()
         if not zones:
             zones = [{"id": i, "num": 0, "max": 0} for i in range(cfg["maxZone"])]
-        cand = [z for z in zones if z["id"] not in self.visited and not (z["max"] > 0 and z["num"] >= z["max"])]
-        cand.sort(key=lambda z: (-z["num"], z["id"]))
+        # khu đông người trước; khu đầy (boss hay ở khu đông nhất nên dễ đầy) để cuối cùng thay vì bỏ hẳn -
+        # server báo "đầy" thì poll_zone_message đánh dấu đã dò
+        cand = [z for z in zones if z["id"] not in self.visited]
+        cand.sort(key=lambda z: (z["max"] > 0 and z["num"] >= z["max"], -z["num"], z["id"]))
         self.zone_info = f'{cand[0]["num"]} người, còn {len(cand)} khu' if cand else ""
         return cand[0]["id"] if cand else -1
 

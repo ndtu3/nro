@@ -31,6 +31,11 @@ assert h.fight_order(alive)[0][1]["name"].startswith("Xên con")  # đánh Xên 
 h = hunter(sbh, [boss("Siêu Bọ Hung")])
 assert h.fight_order(h.alive_bosses_here())[0][1]["name"] == "Siêu Bọ Hung"
 
+# Cụm "Xên Bọ Hung" (có Xên hoàn thiện), boss_clusters.json cũ không ghi "minions": vẫn đánh Xên con trước
+xbh = {"name": "Xên Bọ Hung", "enabled": True, "members": ["Xên Bọ Hung *", "Xên hoàn thiện"]}
+h = hunter(xbh, [boss("Xên hoàn thiện", pk=5), boss("Xên con 4")])
+assert [i["name"] for _c, i in h.fight_order(h.alive_bosses_here())] == ["Xên con 4", "Xên hoàn thiện"]
+
 # Cụm khác không có boss con: vẫn ưu tiên boss đang đánh mình (pk 5) như cũ, không nhận boss lạ
 other = {"name": "Bojack", "members": ["Bojack", "Bido"]}
 h = hunter(other, [boss("Bido"), boss("Bojack", pk=5), boss("Xên con 1")])
