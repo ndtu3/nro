@@ -1902,6 +1902,19 @@ class BossHunter:
         self.sword_at = now + 10000
         return True
 
+    def sword_make_room(self, todo, now):
+        """Hành trang đầy nên không mua được nguyên liệu: vứt 1 Kiếm Z kém nhất trong số chưa đủ cấp (không đụng kiếm đang giữ)"""
+        if not todo:
+            return False
+        slot, dmg, lvl = min(todo, key=lambda sw: (sw[2], sw[1]))
+        self.mem.close_menu()
+        self.mem.hide_panels()
+        if not self.mem.throw_bag_item(slot):
+            return False
+        self.log(f"Kiếm Z: hành trang đầy không mua được nguyên liệu, vứt kiếm +{lvl} sức đánh {dmg}%")
+        self.sword_at = now + 500
+        return True
+
     def sword_set_phase(self, phase):
         self.sword_phase = phase
         self.sword_fail = 0
@@ -2047,6 +2060,8 @@ class BossHunter:
                     self.log(f"Kiếm Z: đã mua {have - start} {'Tinh thể' if tid == ITEM_ID_TINH_THE else 'Đá ngục tù'}")
                     self.sword_buy = None
                     if have - start <= 0:
+                        if empty <= 0 and self.sword_make_room(todo, now):
+                            return True  # hành trang đầy thì không mua được: bỏ bớt 1 kiếm rồi mua lại (chưa được thì bỏ tiếp)
                         return self.sword_retry("không mua được nguyên liệu ở NPC Mai", now)
                 self.sword_at = now + 500
                 return True
@@ -2059,6 +2074,8 @@ class BossHunter:
                 return False
             if not self.sword_goto(MAP_ID_NGUC_TU_2, cur_map, now) or self.sword_dodge_cumber(cur_zone, now):
                 return True
+            if empty <= 0 and (tinh if need == ITEM_ID_TINH_THE else da) <= 0 and self.sword_make_room(todo, now):
+                return True  # hết sạch loại này + hành trang đầy: không có ô cho món mua về
             if not self.sword_open_shop(now):
                 return True
             items = mem.start_autobuy(need, 10, SWORD_BUY_QTY // 10, 80)

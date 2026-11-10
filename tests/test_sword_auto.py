@@ -138,4 +138,19 @@ assert not mem.new and h.sword_active and "thử lại" in logs[-1], (mem.new, l
 assert sorted(mem.thrown) == [(2, 0), (3, 0), (25, 6)], mem.thrown
 assert [(d, lvl) for d, lvl, _b in mem.swords.values()] == [(40, 6)], mem.swords
 assert mem.bag[cp.ITEM_ID_TINH_THE] == cp.SWORD_BUY_QTY - 4 * 99 and mem.bag[cp.ITEM_ID_DA_NGUC_TU] == cp.SWORD_BUY_QTY - 12
+
+# hành trang đầy + hết sạch Đá ngục tù: không có ô để mua -> vứt kiếm kém nhất (chưa đủ cấp) rồi mới mua được
+mem = FakeMem()
+mem.bag.update({cp.ITEM_ID_TINH_THE: 5000, cp.ITEM_ID_DA_NGUC_TU: 0})
+mem.swords = {0: [5, 0, 5], 1: [9, 0, 9]}
+mem.new, mem.map = [], cp.MAP_ID_NGUC_TU_2
+real_start = mem.start_autobuy
+mem.start_autobuy = lambda *a: real_start(*a) if len(mem.swords) < mem.cap else []
+h = cp.BossHunter(mem, lambda: {}, logs.append)
+h.interact_npc = lambda npc: setattr(mem, "menu", list(NPC_MENUS[(mem.map, npc)])) or True
+h.chars_in_map = lambda: []
+h.set_sword_auto(True)
+for i in range(20):
+    h.sword_tick(1, mem.map, 0, i * 10000.0)
+assert mem.thrown == [(5, 0)] and mem.bag[cp.ITEM_ID_DA_NGUC_TU] > 0, (mem.thrown, mem.bag, logs[-4:])
 print("OK: Kiếm Z - mua nguyên liệu, đổi, vứt kiếm xấu, nâng +6, chỉ giữ kiếm +6 trên 30%")
