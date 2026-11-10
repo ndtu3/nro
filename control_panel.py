@@ -61,6 +61,13 @@ AUTO_ITEM_DEFS = [
     ("bua2", "Bùa x2 Đệ", [1628], ["bùa x2 tnsm đệ tử"], False),
     ("bua3", "Bùa x3 Đệ", [1985], ["bùa x3 tnsm đệ tử"], False),
     ("ad", "Ẩn danh", [385, 1154], ["ẩn danh", "ẩn danh 2"], False),
+    ("xh", "Xuyên Huyết", [1306], ["xuyên huyết"], False),
+    # thức ăn: mỗi món 1 ô - hiệu ứng thức ăn chỉ giữ được 1 món, tích cả 5 thì MOD ăn liền cả 5
+    ("ta1", "Bánh Pudding", [663], ["bánh pudding"], False),
+    ("ta2", "Xúc xích", [664], ["xúc xích"], False),
+    ("ta3", "Kem dâu", [665], ["kem dâu"], False),
+    ("ta4", "Mì ly", [666], ["mì ly"], False),
+    ("ta5", "Sushi", [667], ["sushi"], False),
 ]
 
 DEFAULT_BOSS_CFG = {
@@ -333,10 +340,9 @@ def load_config():
         "loginAutoItem": False,
         "autoItems": {k: d for k, _, _, _, d in AUTO_ITEM_DEFS},
         "customAutoItems": "",
-        "coffinThreads": 10,
-        "coffinQty": 100,
-        "coffinDelayMs": 80,
-        "autoCoffin": True,
+        "swordMinNew": 5,
+        "swordMaxLevel": 6,
+        "swordMinFinal": 30,
         "eggDelayMs": 120,
         "eggAutoBuyStone": True,
         "eggAutoBuyEgg": True,
@@ -355,6 +361,8 @@ def load_config():
                 auto_items.update(loaded["autoItems"])
             loaded["autoItems"] = auto_items
             cfg.update(loaded)
+            for k in ("coffinThreads", "coffinQty", "coffinDelayMs", "autoCoffin"):  # tính năng đã bỏ
+                cfg.pop(k, None)
         except Exception:
             pass
     return cfg
@@ -415,7 +423,7 @@ SKH_OPT_IDS = set(range(127, 145)) | {224, 225}
 CAVE, FPS_APPLY, LOGIC_HOOK = 0x330CE0, 0x331180, 0x5087D5
 D_PICKED, D_FORCE, D_FPS_REQ, D_ACTION_BUF = 0xEFBD20, 0xEFBD80, 0xEFBD84, 0xEFBDA0
 
-# RVA các hàm trong GameAssembly.dll dùng cho Săn Cụm BOSS, Nhiệm Vụ, Đăng Nhập, Tự dùng Item & Auto Mua Quan Tài
+# RVA các hàm trong GameAssembly.dll dùng cho Săn Cụm BOSS, Nhiệm Vụ, Đăng Nhập, Tự dùng Item & Kiếm Z
 RVA_CLASS_INIT = 0x953D0
 RVA_XMAP_START = 0x46E5F0
 RVA_XMAP_STOP = 0x46E690
@@ -446,10 +454,6 @@ RVA_AUTOBUY_ALLOC = 0x477510
 RVA_AUTOBUY_START = 0x477AF0
 RVA_AUTOBUY_DELAY_IMM = 0x476CAA
 RVA_AUTOBUY_CMP_INS = 0x476C3D
-ITEM_ID_COFFIN = 1116             # Hòm Halloween (Quan tài)
-ITEM_ID_CAPSULE_HALLOWEEN = 818   # Capsule Halloween (20 capsule = 1 Hòm Halloween)
-NPC_ID_SANTA = 39                 # NPC Santa
-SANTA_MAPS = (5, 13, 20)          # Đảo Kamê, Đảo Guru, Vách núi đen
 NPC_ID_BUNMA_HOME = 37            # Bunma tại Nhà Bunma (map 101: Cửa hàng bán Trứng Linh Thú / 99 Đá Linh Lực)
 NPC_ID_KARIN = 18                 # Thần Mèo Karin (hỗ trợ song song cùng Bunma)
 NPC_ID_MABU_EGG = 50              # Trứng Mabu / Trứng Linh Thú tại Nhà Bunma (map 101)
@@ -537,25 +541,35 @@ def parse_zone_cooldown(text):
     return None
 
 
-def parse_coffin_message(text):
-    """Phân tích thông báo server khi mua Hòm Halloween (Quan tài):
-    Trả về ('sold_out'|'no_currency'|'bag_full'|None, wait_seconds, raw_text)"""
-    t = norm_str(text)
-    if not t or t.startswith("|"):
-        return None, 0, ""
-    if "số lượng đã hết" in t or ("hòm halloween" in t and ("hết" in t or "chờ" in t)):
-        m_min = re.search(r"(\d+)\s*phút", t)
-        m_sec = re.search(r"(\d+)\s*giây", t)
-        if m_min or m_sec:
-            wait_sec = (int(m_min.group(1)) * 60 if m_min else 0) + (int(m_sec.group(1)) if m_sec else 0)
-        else:
-            wait_sec = 60
-        return "sold_out", wait_sec, text.strip()
-    if any(w in t for w in ("không đủ", "cần có", "chưa đủ")):
-        return "no_currency", 0, text.strip()
-    if any(w in t for w in ("hành trang đã đầy", "không còn chỗ trống", "ô trống trong hành trang", "rương đồ đã đầy")):
-        return "bag_full", 0, text.strip()
-    return None, 0, ""
+# ---------- Kiếm Z: đổi ở Tổ Sư Kaio (Thánh địa Kaio), nâng cấp + mua nguyên liệu ở NPC Mai (Hành tinh ngục tù 2) ----------
+ITEM_ID_KIEM_Z = 1986
+ITEM_ID_TINH_THE = 1987
+ITEM_ID_DA_NGUC_TU = 1988
+NPC_ID_TO_SU_KAIO = 43
+NPC_ID_OSIN = 44
+NPC_ID_MAI = 76
+MAP_ID_KAIO = 48                  # Hành tinh Kaio (Thần Vũ Trụ đưa xuống Thánh địa Kaio)
+NPC_ID_THAN_VU_TRU = 20
+MAP_ID_THANH_DIA_KAIO = 50
+MAP_ID_BILL = 154
+MAP_ID_NGUC_TU_1 = 155
+MAP_ID_NGUC_TU_2 = 166
+OPT_ID_SUC_DANH = 50              # "Sức đánh+#%"
+OPT_ID_CAP = 72                   # "Cấp #" (đã nâng +N)
+SWORD_COST_TINH_THE = 99          # đổi 1 Kiếm Z vĩnh viễn: 99 Tinh thể + 100 Thỏi vàng
+SWORD_COST_THOI_VANG = 100
+SWORD_BUY_QTY = 10000             # mỗi lần hết nguyên liệu thì mua 10000 cái (1 Thỏi vàng / cái)
+SWORD_MIN_MAT = 200               # Tinh thể / Đá ngục tù còn dưới ngần này thì đi mua (mỗi lần nâng tốn vài cái mỗi loại)
+
+
+def sword_action(dmg, level, min_new=5, max_level=6, min_final=30):
+    """Việc cần làm với 1 Kiếm Z: "vứt" (mới đổi mà sức đánh < min_new%, hoặc đã +max_level mà sức đánh <= min_final%),
+    "giữ" (đã +max_level và sức đánh > min_final%), còn lại "nâng"."""
+    if level >= max_level:
+        return "giữ" if dmg > min_final else "vứt"
+    if level <= 0 and dmg < min_new:
+        return "vứt"
+    return "nâng"
 
 
 class GameMemory:
@@ -845,12 +859,12 @@ class GameMemory:
                 and self.read(self.base + LOGIC_HOOK, 5) == bytes.fromhex("e8e689e2ff"))
 
     def scan_bag(self, me):
-        """Quét hành trang (arrItemBag): trả về (số ô có đồ, số món SKH, danh sách index đồ rác cần vứt, số Quan tài, số Capsule)"""
+        """Quét hành trang (arrItemBag): trả về (số ô có đồ, số món SKH, danh sách index đồ rác cần vứt)"""
         bag = self.ptr(me + 0x250)
         if not bag:
-            return 0, 0, [], 0, 0
+            return 0, 0, []
         n = self.num(bag + 0x18, "<i")
-        used, skh, junk, coffins, capsules = 0, 0, [], 0, 0
+        used, skh, junk = 0, 0, []
         for idx in range(min(max(n, 0), 200)):
             it = self.ptr(bag + 0x20 + 8 * idx)
             if not it:
@@ -859,13 +873,6 @@ class GameMemory:
             if not tpl:
                 continue
             used += 1
-            tid = self.num(tpl + 0x10, "<h")
-            if tid == ITEM_ID_COFFIN:
-                q_it = self.num(it + 0x38, "<i")
-                coffins += q_it if q_it > 0 else 1
-            elif tid == ITEM_ID_CAPSULE_HALLOWEEN:
-                q_it = self.num(it + 0x38, "<i")
-                capsules += q_it if q_it > 0 else 1
             itype = self.num(tpl + 0x12, "<b")
             # Chỉ xét các loại trang bị đeo lên người (0..4: Áo/Quần/Găng/Giày/Rada, 5: Cải trang,
             # 11: Phụ kiện đeo lưng, 21: Linh thú/Pet, 23/24: Thú cưỡi, 32: Giáp tập luyện, 35/36/39/72: Phụ kiện)
@@ -904,7 +911,7 @@ class GameMemory:
                 skh += 1
             elif has_expiry or (0 <= itype <= 4 and not is_valuable):
                 junk.append(idx)
-        return used, skh, junk, coffins, capsules
+        return used, skh, junk
 
     def throw_bag_item(self, slot_idx):
         """Vứt 1 món đồ tại ô slot_idx trong hành trang ra đất (2 bước: gửi 2003 -> xác nhận 2004)"""
@@ -1193,7 +1200,7 @@ class GameMemory:
         ms = max(20, min(2000, int(delay_ms)))
         return self.patch_code_bytes(RVA_AUTOBUY_DELAY_IMM, struct.pack("<i", ms))
 
-    def find_shop_item(self, me, target_tid=ITEM_ID_COFFIN):
+    def find_shop_item(self, me, target_tid):
         """Tìm vật phẩm có templateId == target_tid trong cửa hàng đang mở (me.arrItemShop tại me+0x270)"""
         shop = self.ptr(me + 0x270) if me else 0
         if not shop:
@@ -1230,6 +1237,28 @@ class GameMemory:
                 q = self.num(it + 0x38, "<i")
                 total_qty += q if q > 0 else 1
         return total_qty, empty_slots
+
+    def list_swords(self, me):
+        """Các Kiếm Z trong hành trang: [(ô, % sức đánh, cấp)]; % sức đánh = None nếu chưa đọc được chỉ số (không được vứt)"""
+        bag = self.ptr(me + 0x250) if me else 0
+        out = []
+        for idx in range(min(max(self.num(bag + 0x18, "<i"), 0), 200) if bag else 0):
+            it = self.ptr(bag + 0x20 + 8 * idx)
+            tpl = self.ptr(it + 0x18) if it else 0
+            if not tpl or self.num(tpl + 0x10, "<h") != ITEM_ID_KIEM_Z:
+                continue
+            opts = self.ptr(it + 0x10)
+            dmg, level = None, 0
+            for j in range(min(max(self.num(opts + 0x18, "<i"), 0), 30) if opts else 0):
+                opt = self.ptr(opts + 0x20 + 8 * j)
+                otpl = self.ptr(opt + 0x18) if opt else 0
+                oid = self.num(otpl + 0x10, "<i") if otpl else -1
+                if oid == OPT_ID_SUC_DANH:
+                    dmg = self.num(opt + 0x10, "<i")
+                elif oid == OPT_ID_CAP:
+                    level = self.num(opt + 0x10, "<i")
+            out.append((idx, dmg, level))
+        return out
 
     def find_egg_in_bag(self, me):
         """Tìm vị trí quả trứng linh thú trong hành trang (me+0x250)"""
@@ -1284,6 +1313,12 @@ class GameMemory:
             if panel and self.read(panel + 0x10, 1) != b"\x00":
                 return True
         return False
+
+    def is_shop_open(self):
+        """Cửa hàng NPC đang mở: lúc đó có thêm Panel thứ 2 (dd+0xE0); chỉ mở hành trang thì không có"""
+        dd_st = self.statics("dd")
+        panel2 = self.ptr(dd_st + 0xE0) if dd_st else 0
+        return bool(panel2) and self.read(panel2 + 0x10, 1) != b"\x00"
 
     def hide_panels(self):
         """Đóng các Panel đang mở trên màn hình"""
@@ -1347,6 +1382,25 @@ class GameMemory:
         self.write(dd_st + 0x100, struct.pack("<Q", 0))
         return True
 
+    def use_bag_slot(self, slot_idx):
+        """Bấm "Sử dụng" đúng ô slot_idx của hành trang qua Panel (lệnh 2001), không đóng cửa hàng đang mở"""
+        bh, dd_st = self.statics("bh"), self.statics("dd")
+        me = self.ptr(bh + 0xA8) if bh else 0
+        panel = self.ptr(dd_st + 0xD8) if dd_st else 0
+        if not (me and panel):
+            return False
+        body = self.ptr(me + 0x260)
+        body_len = self.num(body + 0x18, "<i") if body else 10
+        old_page = self.num(panel + 0x238, "<i")
+        old_sel = self.num(panel + 0x230, "<i")
+        self.write(panel + 0x238, struct.pack("<i", 0))
+        self.write(panel + 0x230, struct.pack("<i", slot_idx + body_len + 1))
+        # perform_action xoá vật phẩm còn dính trên nút mượn (sau khi vứt đồ nút còn giữ món vừa vứt -> lệnh 2001 dùng nhầm món đó)
+        ok = self.perform_action(panel, 2001, 0)
+        self.write(panel + 0x238, struct.pack("<i", old_page))
+        self.write(panel + 0x230, struct.pack("<i", old_sel))
+        return ok
+
     def use_bag_item(self, slot_idx):
         """Sử dụng 1 món đồ tại ô slot_idx trong hành trang (ưu tiên gọi RVA_USE_ITEM_BY_TID trực tiếp)"""
         if slot_idx < 0:
@@ -1367,35 +1421,7 @@ class GameMemory:
         if tid >= 0:
             ok = self.call_fn(RVA_USE_ITEM_BY_TID, tid & 0xFFFFFFFF, 0)
         if not ok:
-            with self.call_lock:
-                panel = self.ptr(dd_st + 0xD8)
-                msgdlg = self.ptr(dd_st + 0x108)
-                if not (panel and msgdlg):
-                    return False
-                body = self.ptr(me + 0x260)
-                body_len = self.num(body + 0x18, "<i") if body else 10
-                cmd = self.gadget_cmd(msgdlg)
-                if not cmd:
-                    return False
-                old_page = self.num(panel + 0x238, "<i")
-                old_sel = self.num(panel + 0x230, "<i")
-                self.write(panel + 0x238, struct.pack("<i", 0))
-                self.write(panel + 0x230, struct.pack("<i", slot_idx + body_len + 1))
-                self.write(cmd + 0x90, struct.pack("<Q", 0))
-                self.write(cmd + 0x30, struct.pack("<Q", panel))
-                self.write(cmd + 0x38, struct.pack("<i", 2001))
-                self.write(dd_st + 0x100, struct.pack("<Q", msgdlg))
-                self.write(main_st + 0x4C, struct.pack("<i", 1))
-                t0 = time.monotonic()
-                while time.monotonic() - t0 < 1.0:
-                    if self.num(main_st + 0x4C, "<i") == 0:
-                        ok = True
-                        break
-                    time.sleep(0.015)
-                self.write(panel + 0x238, struct.pack("<i", old_page))
-                self.write(panel + 0x230, struct.pack("<i", old_sel))
-                self.write(cmd + 0x38, struct.pack("<i", 0))
-                self.write(dd_st + 0x100, struct.pack("<Q", 0))
+            ok = self.use_bag_slot(slot_idx)
         if ok:
             t_wait = time.monotonic()
             while time.monotonic() - t_wait < 0.55:
@@ -1445,7 +1471,7 @@ class GameMemory:
         self.call_fn(RVA_MENU_CLOSE, menu, 0)
         return True
 
-    def start_coffin_autobuy(self, threads=10, qty_per_thread=100, delay_ms=80, item_id=ITEM_ID_COFFIN):
+    def start_autobuy(self, item_id, threads=10, qty_per_thread=100, delay_ms=80):
         """Khởi chạy song song N luồng Auto Mua (như bấm Auto Mua + nhập 100 liên tiếp N lần) kèm vá giảm delay"""
         threads = max(1, min(30, int(threads)))
         qty_per_thread = max(1, min(1000, int(qty_per_thread)))
@@ -1560,7 +1586,7 @@ class GameMemory:
         name = self.string(me + 0x190)
         if not name:
             return s
-        bag_used, skh_count, junk_slots, coffin_count, capsule_count = self.scan_bag(me)
+        bag_used, skh_count, junk_slots = self.scan_bag(me)
         q = self.read_quest_info(me)
         s["offline"] = bool(cur_scr) and cur_scr in (login_scr, srv_scr)
         fg_st = self.statics("fg")
@@ -1576,8 +1602,7 @@ class GameMemory:
         s.update(ready=True, name=name, hp=self.num(me + 0xD0, "<q"), hpFull=self.num(me + 0x108, "<q"),
                  mp=self.num(me + 0xC8, "<q"), mpFull=self.num(me + 0x110, "<q"), dead=self.num(me + 0x88, "<i") == 14,
                  map=self.string(jb + 0x70), mapId=self.num(jb + 0x7C, "<i"), zone=self.num(jb + 0x84, "<i"),
-                 bagUsed=bag_used, skhCount=skh_count, junkSlots=junk_slots,
-                 coffinCount=coffin_count, capsuleCount=capsule_count, quest=q)
+                 bagUsed=bag_used, skhCount=skh_count, junkSlots=junk_slots, quest=q)
         return s
 
     def set_flag(self, key, on):
@@ -1698,28 +1723,17 @@ class BossHunter:
         self.q_xmap_tries = 0
         self.q_xmap_at = 0.0
         self.q_last_popup_at = 0.0
-        # Trạng thái Auto Mua Quan Tài (Hòm Halloween - Shop Santa)
-        self.coffin_hourly = False
-        self.coffin_active = False
-        self.coffin_phase = ""
-        self.coffin_probe_mode = False
-        self.coffin_force_burst = False
-        self.coffin_sec_synced = False
-        self.coffin_last_min = None
-        self.coffin_last_check_at = 0.0
-        self.coffin_items = []
-        self.coffin_threads = 10
-        self.coffin_qty = 100
-        self.coffin_delay = 80
-        self.coffin_start_count = 0
-        self.coffin_last_logged_bought = 0
-        self.coffin_total_bought = 0
-        self.coffin_phase_t = 0.0
-        self.coffin_next_at = 0.0
-        self.coffin_restock_at = 0.0
-        self.coffin_info_seen = set()
-        self.coffin_open_tries = 0
-        self.coffin_shop_ready = False
+        # Trạng thái tự đổi + nâng cấp Kiếm Z
+        self.sword_active = False
+        self.sword_phase = "BUY"        # BUY (mua nguyên liệu ở Mai), EXCHANGE (đổi ở Tổ Sư Kaio), UPGRADE (nâng ở Mai)
+        self.sword_at = 0.0             # chưa tới lúc này thì chưa làm bước kế
+        self.sword_fail = 0
+        self.sword_buy = None
+        self.sword_last = None
+        self.sword_xmap_at = 0.0
+        self.sword_door_n = (-1, 0)
+        self.sword_min_new, self.sword_max_level, self.sword_min_final = 5, 6, 30
+        self.sword_status_text = "Đang dừng"
         # Trạng thái Auto Ấp Trứng & Mua Đá Linh Lực
         self.egg_active = False
         self.egg_phase = "INIT"         # INIT, SPEEDUP, BUY_STONE, HATCH, BUY_EGG, USE_EGG, RELOAD_MAP
@@ -1759,25 +1773,8 @@ class BossHunter:
             if self.egg_single_action:
                 return f"Ấp: {self.egg_single_action}"
             return f"Ấp trứng ({self.egg_status_text})"
-        if self.coffin_active or self.coffin_hourly:
-            now = time.monotonic() * 1000.0
-            if self.coffin_phase == "BURST":
-                if self.coffin_probe_mode:
-                    tag = f"Xả cuối QT ({len(self.coffin_items) or self.coffin_threads} luồng)"
-                else:
-                    tag = f"Bắn QT ({len(self.coffin_items) or self.coffin_threads} luồng)"
-                return f"{tag} (+{self.coffin_total_bought})" if self.coffin_total_bought else tag
-            if self.coffin_phase == "CHECK_TIME":
-                return "Check giờ QT..."
-            if self.coffin_phase == "OPEN_SHOP":
-                return "Mở Shop Santa..."
-            if self.coffin_phase == "TRAVEL":
-                return "XMAP -> Santa"
-            if self.coffin_phase == "WAIT_RESTOCK":
-                rem_s = max(0, int((self.coffin_restock_at - now + 999) // 1000))
-                next_s = max(0, int((self.coffin_next_at - now + 999) // 1000))
-                bought_txt = f" (+{self.coffin_total_bought})" if self.coffin_total_bought else ""
-                return f"Canh QT {rem_s // 60}p{rem_s % 60:02d}s (check {next_s}s){bought_txt}"
+        if self.sword_active:
+            return f"Kiếm Z ({self.sword_phase})"
         if not self.enabled and not self.quest_mode:
             return "Tắt"
         st = STATE_SHORT.get(self.state, self.state)
@@ -1845,100 +1842,6 @@ class BossHunter:
         if (self.enabled or self.quest_mode) and self.state != "IDLE":
             self.finish_target("bỏ qua theo yêu cầu")
 
-    # ---------- Auto Mua Quan Tài (Hòm Halloween - Shop Santa) ----------
-    def trigger_coffin_now(self, threads=10, qty=100, delay_ms=80):
-        """Bắn ngay N luồng Auto Mua Quan Tài song song (và tự dừng ngay khi xong / hết hàng)"""
-        self.mem.stop_all_autobuy(self.coffin_items)
-        self.coffin_items = []
-        self.coffin_threads = max(1, min(30, int(threads)))
-        self.coffin_qty = max(1, min(1000, int(qty)))
-        self.coffin_delay = max(20, min(2000, int(delay_ms)))
-        self.coffin_probe_mode = False
-        self.coffin_force_burst = True
-        self.coffin_active = True
-        self.coffin_phase = "INIT"
-        self.coffin_open_tries = 0
-        self.coffin_phase_t = 0.0
-        self.log(f"Bắt đầu Auto Mua Quan Tài đa luồng ({self.coffin_threads} luồng x {self.coffin_qty} lần, delay {self.coffin_delay}ms)")
-
-    def set_coffin_hourly(self, on, threads=10, qty=100, delay_ms=80):
-        """Bật/tắt chế độ Canh Mua Quan Tài 1h/lần (check mỗi 1 phút, chỉ xả đa luồng ở 1-5 giây cuối)"""
-        if on:
-            self.coffin_hourly = True
-            self.coffin_threads = max(1, min(30, int(threads)))
-            self.coffin_qty = max(1, min(1000, int(qty)))
-            self.coffin_delay = max(20, min(2000, int(delay_ms)))
-            self.coffin_probe_mode = False
-            self.coffin_force_burst = False
-            self.coffin_sec_synced = False
-            self.coffin_last_min = None
-            self.coffin_last_check_at = 0.0
-            self.coffin_active = True
-            self.coffin_phase = "INIT"
-            self.coffin_open_tries = 0
-            self.coffin_phase_t = 0.0
-            self.log(f"Bật Canh Mua Quan Tài 1h/lần (check mỗi 1 phút, xả {self.coffin_threads} luồng x {self.coffin_qty} ở 4 giây cuối)")
-        else:
-            self.coffin_hourly = False
-            self.stop_coffin_buy("Đã tắt Canh Mua Quan Tài 1h/lần", keep_hourly=False)
-
-    def stop_coffin_buy(self, reason="Đã dừng Auto Mua Quan Tài", keep_hourly=False):
-        """Dừng tức thì toàn bộ các luồng Auto Mua Quan Tài đang chạy"""
-        self.mem.stop_all_autobuy(self.coffin_items)
-        self.coffin_items = []
-        self.coffin_probe_mode = False
-        self.coffin_force_burst = False
-        if not keep_hourly:
-            self.coffin_active = False
-            self.coffin_phase = ""
-        if reason:
-            self.log(reason)
-
-    def clear_coffin_info1(self):
-        """Xóa thông báo hết hàng cũ trên GameScr.info1 trước khi check giờ hoặc bắt đầu xả mua"""
-        dg_st = self.mem.statics("dg")
-        info1 = self.mem.ptr(dg_st + 0x2B0) if dg_st else 0
-        info = self.mem.ptr(info1 + 0x18) if info1 else 0
-        if info:
-            cur_it = self.mem.ptr(info + 0x18)
-            if cur_it and parse_coffin_message(self.mem.string(cur_it + 0x10))[0] is not None:
-                self.mem.write(info + 0x18, struct.pack("<Q", 0))
-
-    def launch_coffin_check(self, me, coffins, capsules, now):
-        """Chỉ gửi 1 lượt mua duy nhất (1 luồng x 1 lần) để kiểm tra còn bao nhiêu phút đến đợt mở bán tiếp theo (không gây lag)"""
-        self.clear_coffin_info1()
-        self.coffin_info_seen = {ptr for ptr, _ in self.info1_items()}
-        self.coffin_start_count = coffins
-        self.coffin_last_logged_bought = 0
-        self.coffin_probe_mode = False
-        self.coffin_items = self.mem.start_coffin_autobuy(1, 1, 80, ITEM_ID_COFFIN)
-        self.coffin_phase = "CHECK_TIME"
-        self.coffin_phase_t = now
-
-    def launch_coffin_burst(self, me, coffins, capsules, now, probe=False):
-        """Khởi chạy đợt bắn Auto Mua Quan Tài đa luồng (probe=True: xả ở 1-5 giây cuối trước giờ mở bán)"""
-        self.clear_coffin_info1()
-        self.coffin_info_seen = {ptr for ptr, _ in self.info1_items()}
-        self.coffin_start_count = coffins
-        self.coffin_last_logged_bought = 0
-        self.coffin_probe_mode = bool(probe)
-        self.coffin_force_burst = False
-        n_threads = self.coffin_threads
-        n_qty = max(self.coffin_qty, 150) if probe else self.coffin_qty
-        self.coffin_items = self.mem.start_coffin_autobuy(n_threads, n_qty, self.coffin_delay, ITEM_ID_COFFIN)
-        self.coffin_phase = "BURST"
-        self.coffin_phase_t = now
-        if probe:
-            self.log(
-                f"Đã vào 4 giây cuối! Xả {len(self.coffin_items)} luồng Auto Mua Quan Tài "
-                f"(mỗi luồng {n_qty} lần, delay {self.coffin_delay}ms | {capsules} Capsule) đón 1000 hòm!"
-            )
-        else:
-            self.log(
-                f"Đang bắn {len(self.coffin_items)} luồng Auto Mua Quan Tài song song "
-                f"(mỗi luồng {n_qty} lần, delay {self.coffin_delay}ms | có {capsules} Capsule)..."
-            )
-
     def set_egg_auto(self, enabled, delay_ms=120, target_days=0, buy_stone=True, buy_egg=True, use_egg=True):
         self.egg_active = bool(enabled)
         self.egg_delay = max(40, min(2000, int(delay_ms)))
@@ -1963,6 +1866,263 @@ class BossHunter:
         self.egg_visited_sieu_thi = False
         self.egg_status_text = "Đã dừng"
         self.log(reason)
+
+    # ---------- Tự đổi + nâng cấp Kiếm Z ----------
+    def set_sword_auto(self, enabled, min_new=5, max_level=6, min_final=30):
+        if not enabled:
+            self.stop_sword_auto("TẮT tự đổi Kiếm Z")
+            return
+        self.sword_min_new, self.sword_max_level, self.sword_min_final = int(min_new), int(max_level), int(min_final)
+        self.sword_active = True
+        self.sword_phase = "BUY"
+        self.sword_at = 0.0
+        self.sword_fail = 0
+        self.sword_buy = None
+        self.sword_xmap_at = 0.0
+        self.sword_status_text = "Đang chạy"
+        self.log(f"BẬT tự đổi Kiếm Z (giữ kiếm mới >= {min_new}%, nâng tới +{max_level}, giữ +{max_level} khi > {min_final}%)")
+
+    def stop_sword_auto(self, reason="Đã dừng tự đổi Kiếm Z"):
+        if self.sword_active:
+            self.mem.stop_all_autobuy(self.sword_buy[2] if self.sword_buy else None)
+            self.mem.call_fn(RVA_XMAP_STOP, 0, 0)
+        self.sword_active = False
+        self.sword_buy = None
+        self.sword_status_text = f"Đã dừng: {reason}" if reason else "Đã dừng"
+        if reason:
+            self.log(reason)
+
+    def sword_retry(self, reason, now):
+        """Trục trặc tạm thời (lag, bị đóng cửa hàng, kẹt menu...): không dừng hẳn, dọn màn hình rồi 10 giây sau làm lại"""
+        self.log(f"Kiếm Z: {reason}, 10 giây nữa thử lại")
+        self.mem.close_menu()
+        self.mem.hide_panels()
+        self.sword_fail = 0
+        self.sword_buy = None
+        self.sword_at = now + 10000
+        return True
+
+    def sword_set_phase(self, phase):
+        self.sword_phase = phase
+        self.sword_fail = 0
+        self.sword_buy = None
+
+    def sword_npc_pick(self, npc_tpl_id, words, now):
+        """Mở menu NPC rồi chọn dòng đầu tiên chứa 1 trong các từ (mỗi lần gọi làm 1 bước)"""
+        caps = self.mem.read_current_menu()
+        if caps:
+            idx = next((i for w in words for i, c in enumerate(caps) if w in c), -1)
+            if idx >= 0:
+                self.mem.select_menu_option(idx)
+            else:
+                self.mem.close_menu()
+        else:
+            self.interact_npc(npc_tpl_id)
+        self.sword_at = now + 700
+
+    def sword_goto(self, target_map, cur_map, now):
+        """Đi tới Thánh địa Kaio (50) hoặc Hành tinh ngục tù 2 (166); True khi đã tới.
+        50 -Ôsin-> Hành tinh Bill (154) -Ôsin-> ngục tù 1 (155) -cửa phải-> ngục tù 2 (166); XMAP của MOD không biết 154/155/166."""
+        if cur_map == target_map:
+            return True
+        to_prison = target_map == MAP_ID_NGUC_TU_2
+        if cur_map == MAP_ID_NGUC_TU_1 and to_prison or cur_map == MAP_ID_NGUC_TU_2:
+            self.mem.close_menu()
+            self.sword_door(to_prison, cur_map)
+            self.sword_at = now + 4000
+        elif cur_map == MAP_ID_NGUC_TU_1:
+            self.sword_npc_pick(NPC_ID_OSIN, ["bill"], now)
+        elif cur_map == MAP_ID_BILL and to_prison:
+            self.sword_npc_pick(NPC_ID_OSIN, ["ngục tù"], now)
+        elif cur_map == MAP_ID_THANH_DIA_KAIO:
+            self.sword_npc_pick(NPC_ID_OSIN, ["bill"], now)
+        elif cur_map == MAP_ID_KAIO:
+            # XMAP của MOD kẹt ở menu 2 tầng của Thần Vũ Trụ ("Di chuyển" -> "Thánh địa Kaio"): tự chọn
+            rv_st = self.mem.statics("rv", init=True)
+            if rv_st and self.mem.read(rv_st, 1)[0]:
+                self.mem.call_fn(RVA_XMAP_STOP, 0, 0)
+            self.sword_npc_pick(NPC_ID_THAN_VU_TRU, ["thánh địa", "di chuyển"], now)
+        else:
+            caps = self.mem.read_current_menu()
+            idx = next((i for w in ("thánh địa", "đến kaio", "di chuyển") for i, c in enumerate(caps) if w in c), -1)
+            if idx >= 0:  # menu NPC dọc đường (Thượng Đế, Thần Vũ Trụ): XMAP hay đứng chờ ở đây
+                self.mem.select_menu_option(idx)
+                self.sword_at = now + 1500
+                return False
+            rv_st = self.mem.statics("rv", init=True)
+            if self.sword_xmap_at == 0.0 or (not (rv_st and self.mem.read(rv_st, 1)[0]) and now - self.sword_xmap_at > 8000):
+                self.sword_fail += 1
+                if self.sword_fail > 5:
+                    self.sword_xmap_at = 0.0
+                    self.sword_retry(f"không tới được Thánh địa Kaio từ map {cur_map}", now)
+                    return False
+                self.sword_xmap_at = now
+                self.show_game_scr()
+                self.mem.call_fn(RVA_XMAP_START, MAP_ID_THANH_DIA_KAIO, 0)
+            self.sword_at = now + 1000
+        return False
+
+    def sword_door(self, right, cur_map):
+        """Qua cửa ở mép phải/trái map ngục tù: dịch vào cửa, game tự đổi map khi đứng trong cửa.
+        Không bấm lệnh của cửa như go_waypoint: ở 2 map này làm vậy game văng ngay sau khi sang map (2 lần liền)."""
+        jb, hx_st = self.mem.statics("jb"), self.mem.statics("hx")
+        wps = self.mem.vec_items(self.mem.ptr(jb + 0xA0)) if jb else []
+        if not wps:
+            return
+        min_x = lambda w: self.mem.num(w + 0x10, "<h")  # noqa: E731
+        w = max(wps, key=min_x) if right else min(wps, key=min_x)
+        x = self.mem.num(jb + 0x8, "<i") - 15 if right else 15
+        self.mem.call_fn(RVA_TELEPORT, x, self.mem.num(w + 0x16, "<h"))  # dịch xa có khi dừng ngoài cửa, lần sau mới vào hẳn
+        n = self.sword_door_n[1] + 1 if self.sword_door_n[0] == cur_map else 1
+        self.sword_door_n = (cur_map, n)
+        if n % 3 == 0 and hx_st:  # đứng trong cửa 2 lần mà chưa đổi map: xin đổi map (gói -23)
+            time.sleep(0.3)
+            self.mem.call_fn(RVA_REQUEST_CHANGE_MAP, self.mem.ptr(hx_st), 0)
+
+    def sword_dodge_cumber(self, cur_zone, now):
+        """Map ngục tù 2 hay có boss Cumber: thấy nó trong khu thì đổi sang khu khác. True = vừa xin đổi khu."""
+        if not any("cumber" in norm_str(self.char_info(c)["name"]) for c in self.chars_in_map()):
+            return False
+        zones = [z["id"] for z in self.zone_list() if z["id"] != cur_zone and not (z["max"] > 0 and z["num"] >= z["max"])]
+        self.request_zone(zones[int(now) % len(zones)] if zones else cur_zone + 1, now)
+        self.log("Kiếm Z: khu có Cumber, đổi khu")
+        self.sword_at = now + 3000
+        return True
+
+    def sword_open_shop(self, now):
+        """Mở cửa hàng NPC Mai (mỗi lần gọi làm 1 bước); True khi cửa hàng đã mở"""
+        if self.mem.is_shop_open():
+            return True
+        self.sword_npc_pick(NPC_ID_MAI, ["cửa hàng"], now)
+        return False
+
+    def sword_tick(self, me, cur_map, cur_zone, now):
+        if now < self.sword_at:
+            return True
+        mem = self.mem
+        if mem.num(me + 0x88, "<i") == 14 or mem.num(me + 0xD0, "<q") <= 0:  # chết: hồi sinh tại chỗ rồi làm tiếp
+            hx_st = mem.statics("hx")
+            mem.call_fn(RVA_REVIVE_HERE, mem.ptr(hx_st) if hx_st else 0, 0)
+            self.sword_buy = None
+            self.sword_at = now + 6000
+            return True
+        swords = mem.list_swords(me)
+        if any(dmg is None for _slot, dmg, _lvl in swords):
+            self.sword_at = now + 1000  # chỉ số chưa tải xong: chờ, tuyệt đối không vứt
+            return True
+        act = lambda sw: sword_action(sw[1], sw[2], self.sword_min_new, self.sword_max_level, self.sword_min_final)  # noqa: E731
+        bad = [sw for sw in swords if act(sw) == "vứt"]
+        if bad and not self.sword_buy:
+            slot, dmg, lvl = bad[0]
+            mem.close_menu()
+            mem.hide_panels()
+            if mem.throw_bag_item(slot):
+                self.sword_fail = 0
+                self.log(f"Kiếm Z: vứt kiếm +{lvl} sức đánh {dmg}%")
+            else:
+                self.sword_fail += 1
+                if self.sword_fail > 10:
+                    return self.sword_retry("không vứt được kiếm", now)
+            self.sword_at = now + 400
+            return True
+        tinh, empty = mem.count_bag_item(me, ITEM_ID_TINH_THE)
+        da, _ = mem.count_bag_item(me, ITEM_ID_DA_NGUC_TU)
+        tv, _ = mem.count_bag_item(me, ITEM_ID_THOI_VANG)
+        todo = [sw for sw in swords if act(sw) == "nâng"]
+        self.sword_status_text = f"{self.sword_phase} | {len(swords)} kiếm ({len(todo)} cần nâng) | {tinh} tinh thể, {da} đá, {tv} TV"
+
+        if self.sword_phase == "BUY":
+            need = next((t for t, have, low in ((ITEM_ID_TINH_THE, tinh, SWORD_MIN_MAT), (ITEM_ID_DA_NGUC_TU, da, SWORD_MIN_MAT))
+                         if have < low), 0)
+            if self.sword_buy:  # đang mua: [tid, số lúc bắt đầu, các luồng, số lần xem gần nhất, lúc số tăng gần nhất]
+                tid, start, items, last_have, last_t = self.sword_buy
+                have = tinh if tid == ITEM_ID_TINH_THE else da
+                if have != last_have:
+                    self.sword_buy[3:] = [have, now]
+                # cửa hàng bị đóng (mở hành trang, đổi khu...) hoặc 8 giây không mua thêm được cái nào: dừng lượt này, thiếu thì mua lại
+                elif have - start >= SWORD_BUY_QTY or mem.remaining_autobuy_count(items) <= 0 or not mem.is_shop_open() or now - last_t > 8000:
+                    mem.stop_all_autobuy(items)
+                    time.sleep(0.5)  # chờ server trả nốt các lượt mua cuối rồi mới đếm
+                    have = mem.count_bag_item(me, tid)[0]
+                    self.log(f"Kiếm Z: đã mua {have - start} {'Tinh thể' if tid == ITEM_ID_TINH_THE else 'Đá ngục tù'}")
+                    self.sword_buy = None
+                    if have - start <= 0:
+                        return self.sword_retry("không mua được nguyên liệu ở NPC Mai", now)
+                self.sword_at = now + 500
+                return True
+            if not need:
+                mem.hide_panels()
+                self.sword_set_phase("EXCHANGE" if empty > 0 else "UPGRADE")
+                return True
+            if tv < SWORD_BUY_QTY:
+                self.stop_sword_auto(f"Kiếm Z: không đủ {SWORD_BUY_QTY} Thỏi vàng để mua nguyên liệu")
+                return False
+            if not self.sword_goto(MAP_ID_NGUC_TU_2, cur_map, now) or self.sword_dodge_cumber(cur_zone, now):
+                return True
+            if not self.sword_open_shop(now):
+                return True
+            items = mem.start_autobuy(need, 10, SWORD_BUY_QTY // 10, 80)
+            if not items:
+                return self.sword_retry("không chạy được Auto Mua của MOD", now)
+            have = tinh if need == ITEM_ID_TINH_THE else da
+            self.sword_buy = [need, have, items, have, now]
+            self.log(f"Kiếm Z: mua {SWORD_BUY_QTY} {'Tinh thể' if need == ITEM_ID_TINH_THE else 'Đá ngục tù'} ở NPC Mai")
+            self.sword_at = now + 1000
+            return True
+
+        if self.sword_phase == "EXCHANGE":
+            if empty <= 0:
+                mem.close_menu()
+                self.sword_set_phase("UPGRADE")
+                return True
+            if tinh < SWORD_MIN_MAT:
+                self.sword_set_phase("BUY")
+                return True
+            if tv < SWORD_COST_THOI_VANG:
+                self.stop_sword_auto("Kiếm Z: hết Thỏi vàng")
+                return False
+            if not self.sword_goto(MAP_ID_THANH_DIA_KAIO, cur_map, now):
+                return True
+            self.sword_fail += 1  # về 0 mỗi khi vứt được kiếm xấu; kiếm tốt thì túi đầy dần -> sang UPGRADE
+            if self.sword_fail > 60 + 3 * empty:
+                return self.sword_retry("Tổ Sư Kaio không đổi được kiếm", now)
+            self.sword_npc_pick(NPC_ID_TO_SU_KAIO, ["vĩnh viễn", "trao đổi"], now)
+            self.sword_at = now + 350
+            return True
+
+        # UPGRADE
+        if not todo:
+            mem.hide_panels()
+            if empty <= 0:
+                self.stop_sword_auto(f"Kiếm Z: hành trang đầy, đang giữ {len(swords)} kiếm +{self.sword_max_level}")
+                return False
+            self.sword_set_phase("EXCHANGE")
+            return True
+        if da < SWORD_MIN_MAT or tinh < SWORD_MIN_MAT:
+            self.sword_set_phase("BUY")
+            return True
+        if not self.sword_goto(MAP_ID_NGUC_TU_2, cur_map, now) or self.sword_dodge_cumber(cur_zone, now):
+            return True
+        if not self.sword_open_shop(now):
+            return True
+        slot, dmg, lvl = todo[0]
+        self.sword_fail += 1
+        if self.sword_fail > 40:
+            return self.sword_retry("nâng cấp không có tác dụng", now)
+        if self.sword_last != (slot, lvl, da):
+            self.sword_last = (slot, lvl, da)
+            self.sword_fail = 0
+        caps = mem.read_current_menu()
+        if "đồng ý" in caps:  # menu xác nhận nâng cấp: "Đồng ý x100", "Đồng ý x10", "Đồng ý", "Từ chối" -> nâng từng lần
+            mem.select_menu_option(caps.index("đồng ý"))
+        elif caps:
+            mem.close_menu()
+        elif self.sword_fail % 6 == 5:
+            mem.hide_panels()  # bấm mấy lần không ra menu nâng cấp: đóng hết, mở lại cửa hàng
+        else:
+            mem.use_bag_slot(slot)  # đang mở cửa hàng Mai mà bấm Sử dụng Kiếm Z = nâng cấp đúng thanh đó
+        self.sword_at = now + 350
+        return True
 
     def trigger_buy_stone_once(self):
         self.egg_single_action = "BUY_STONE"
@@ -2510,356 +2670,6 @@ class BossHunter:
                 return True
 
         return True
-
-    def coffin_tick(self, me, cur_map, cur_zone, now):
-        """Vòng lặp điều khiển mở Shop Santa, check giờ mỗi 1 phút (1x1), chỉ xả đa luồng ở 1-5 giây cuối và tự dừng ngay khi báo 59 phút"""
-        if not self.coffin_active and not self.coffin_hourly:
-            return False
-        capsules, empty_slots = self.mem.count_bag_item(me, ITEM_ID_CAPSULE_HALLOWEEN)
-        coffins, _ = self.mem.count_bag_item(me, ITEM_ID_COFFIN)
-
-        if self.coffin_phase == "WAIT_RESTOCK":
-            if not self.coffin_hourly:
-                self.coffin_active = False
-                self.coffin_phase = ""
-                return False
-            if empty_slots <= 0 and coffins <= 0:
-                self.coffin_hourly = False
-                self.stop_coffin_buy("Dừng Canh Quan Tài: hành trang đã đầy (0 ô trống)", keep_hourly=False)
-                return False
-            if now < self.coffin_next_at:
-                return False
-            rem_ms = self.coffin_restock_at - now
-            # Chỉ khi đã đồng bộ chuẩn giây chuyển phút VÀ còn <= 4.5 giây cuối mới bật xả đa luồng
-            if self.coffin_sec_synced and rem_ms <= 4500:
-                self.coffin_force_burst = True
-                self.coffin_probe_mode = True
-            else:
-                self.coffin_force_burst = False
-                self.coffin_probe_mode = False
-            self.coffin_phase = "INIT"
-            self.coffin_open_tries = 0
-            self.coffin_phase_t = 0.0
-
-        if self.coffin_phase == "INIT":
-            if empty_slots <= 0 and coffins <= 0:
-                self.coffin_hourly = False
-                self.stop_coffin_buy("Hành trang đã đầy (0 ô trống), dừng Auto Mua Quan Tài", keep_hourly=False)
-                return False
-            if cur_map not in SANTA_MAPS:
-                self.coffin_shop_ready = False
-                self.coffin_phase = "TRAVEL"
-                self.coffin_phase_t = 0.0
-                self.coffin_open_tries = 0
-                return True
-            dd_st = self.mem.statics("dd")
-            panel = self.mem.ptr(dd_st + 0xD8) if dd_st else 0
-            panel_open = bool(panel and self.mem.read(panel + 0x10, 1) != b"\x00")
-            if (self.coffin_shop_ready or panel_open) and self.mem.find_shop_item(me, ITEM_ID_COFFIN) != 0:
-                if self.coffin_force_burst:
-                    self.launch_coffin_burst(me, coffins, capsules, now, probe=self.coffin_probe_mode)
-                else:
-                    self.launch_coffin_check(me, coffins, capsules, now)
-                return True
-            self.coffin_shop_ready = False
-            self.coffin_phase = "OPEN_SHOP"
-            self.coffin_phase_t = 0.0
-            self.coffin_open_tries = 0
-            return True
-
-        if self.coffin_phase == "TRAVEL":
-            if cur_map in SANTA_MAPS:
-                self.coffin_shop_ready = False
-                self.coffin_phase = "OPEN_SHOP"
-                self.coffin_phase_t = now - 1000.0
-                self.coffin_open_tries = 0
-                return True
-            rv_st = self.mem.statics("rv", init=True)
-            xmap_running = bool(self.mem.read(rv_st, 1)[0]) if rv_st else False
-            if self.coffin_phase_t == 0.0 or (not xmap_running and now - self.coffin_phase_t > 8000):
-                if self.coffin_open_tries >= 3:
-                    self.coffin_hourly = False
-                    self.stop_coffin_buy("Không XMAP tới được Đảo Kamê (map 5) để mở Shop Santa", keep_hourly=False)
-                    return False
-                self.coffin_open_tries += 1
-                self.coffin_phase_t = now
-                self.show_game_scr()
-                self.mem.call_fn(RVA_XMAP_START, 5, 0)
-                self.log(f"Mua Quan Tài: XMAP tới Đảo Kamê (map 5) gặp NPC Santa (lần {self.coffin_open_tries})")
-            return True
-
-        if self.coffin_phase == "OPEN_SHOP":
-            if cur_map not in SANTA_MAPS:
-                self.coffin_shop_ready = False
-                self.coffin_phase = "TRAVEL"
-                self.coffin_phase_t = 0.0
-                self.coffin_open_tries = 0
-                return True
-            if self.coffin_shop_ready and self.mem.find_shop_item(me, ITEM_ID_COFFIN) != 0:
-                if self.coffin_force_burst:
-                    self.launch_coffin_burst(me, coffins, capsules, now, probe=self.coffin_probe_mode)
-                else:
-                    self.launch_coffin_check(me, coffins, capsules, now)
-                return True
-            dd_st = self.mem.statics("dd")
-            menu = self.mem.ptr(dd_st + 0xD0) if dd_st else 0
-            if menu and self.mem.read(menu + 0x10, 1) != b"\x00":
-                items = self.mem.vec_items(self.mem.ptr(menu + 0x18))
-                pick = 0
-                for idx, c in enumerate(items):
-                    sub = [x for x in self.mem.str_array(self.mem.ptr(c + 0x28)) if x]
-                    txt = norm_str(" ".join(sub) if sub else self.mem.string(c + 0x20))
-                    if "cửa hàng" in txt or "shop" in txt:
-                        pick = idx
-                        break
-                self.mem.write(menu + 0x20, struct.pack("<i", pick))
-                self.mem.write(menu + 0x85, b"\x00")
-                self.mem.write(menu + 0x84, b"\x01")
-                self.mem.call_fn(RVA_MENU_CLOSE, menu, 0)
-                self.coffin_shop_ready = True
-                self.coffin_phase_t = now - 900.0
-                return True
-            if now - self.coffin_phase_t < 1500:
-                return True
-            npc = self.find_npc(NPC_ID_SANTA)
-            if not npc:
-                if self.coffin_open_tries >= 5:
-                    self.coffin_hourly = False
-                    self.stop_coffin_buy(f"Không tìm thấy NPC Santa ở map {cur_map}", keep_hourly=False)
-                    return False
-                self.coffin_open_tries += 1
-                self.coffin_phase_t = now
-                return True
-            if self.coffin_open_tries >= 6:
-                self.coffin_hourly = False
-                self.stop_coffin_buy("Mở Cửa hàng Santa thất bại sau 6 lần thử", keep_hourly=False)
-                return False
-            nx = self.mem.num(npc + 0x6C, "<i")
-            ny = self.mem.num(npc + 0x70, "<i")
-            if abs(self.mem.num(me + 0x6C, "<i") - nx) > 50:
-                self.mem.call_fn(RVA_TELEPORT, nx, (ny - 1) & 0xFFFFFFFF)
-            self.mem.call_fn(RVA_FOCUS_TO, me, npc)
-            hx_st = self.mem.statics("hx")
-            svc = self.mem.ptr(hx_st) if hx_st else 0
-            if svc:
-                self.mem.call_fn(RVA_OPEN_NPC_MENU, svc, NPC_ID_SANTA)
-                self.coffin_open_tries += 1
-                self.coffin_phase_t = now
-                self.log(f"Mua Quan Tài: mở Cửa hàng NPC Santa (lần {self.coffin_open_tries})...")
-            return True
-
-        if self.coffin_phase == "CHECK_TIME":
-            bought_now = max(0, coffins - self.coffin_start_count)
-            if bought_now > 0:
-                # Quan tài đang mở bán ngay lúc kiểm tra -> lập tức xả đa luồng!
-                self.coffin_total_bought += bought_now
-                self.launch_coffin_burst(me, coffins, capsules, now, probe=True)
-                return True
-
-            for ptr, text in self.info1_items():
-                if ptr in self.coffin_info_seen:
-                    continue
-                self.coffin_info_seen.add(ptr)
-                kind, wait_sec, msg_txt = parse_coffin_message(text)
-                if kind == "sold_out":
-                    self.mem.stop_all_autobuy(self.coffin_items)
-                    self.coffin_items = []
-                    wait_min = wait_sec // 60
-                    prev_min = self.coffin_last_min
-                    just_synced = False
-                    if prev_min is not None and wait_min == prev_min - 1 and (now - self.coffin_last_check_at) <= 12000:
-                        self.coffin_restock_at = now + (wait_min + 1) * 60 * 1000.0
-                        self.coffin_sec_synced = True
-                        just_synced = True
-                    elif self.coffin_sec_synced:
-                        min_ms = now + wait_min * 60 * 1000.0 - 4000.0
-                        max_ms = now + (wait_min + 1) * 60 * 1000.0 + 4000.0
-                        if self.coffin_restock_at < min_ms or self.coffin_restock_at > max_ms:
-                            self.coffin_restock_at = now + (wait_min + 0.5) * 60 * 1000.0
-                            self.coffin_sec_synced = False
-                    else:
-                        self.coffin_restock_at = now + (wait_min + 0.5) * 60 * 1000.0
-
-                    self.coffin_last_min = wait_min
-                    self.coffin_last_check_at = now
-
-                    if wait_min >= 3:
-                        self.coffin_next_at = now + 60000.0
-                        self.coffin_phase = "WAIT_RESTOCK"
-                        self.log(f"Canh Quan Tài: {msg_txt} | Kiểm tra lại sau 1 phút")
-                        return True
-
-                    if wait_min == 2:
-                        if not self.coffin_sec_synced:
-                            self.coffin_next_at = now + 3000.0
-                            if prev_min != 2:
-                                self.log(f"Canh Quan Tài: {msg_txt} | Đang căn chuẩn giây chuyển sang phút cuối...")
-                        else:
-                            self.coffin_next_at = now + 60000.0
-                            self.log(f"Canh Quan Tài: {msg_txt} | Kiểm tra lại sau 1 phút")
-                        self.coffin_phase = "WAIT_RESTOCK"
-                        return True
-
-                    if wait_min == 1:
-                        if not self.coffin_sec_synced:
-                            self.coffin_next_at = now + 2500.0
-                            if prev_min != 1:
-                                self.log(f"Canh Quan Tài: {msg_txt} | Đang căn chuẩn giây chuyển sang 60s cuối...")
-                        else:
-                            rem_ms = self.coffin_restock_at - now
-                            if rem_ms > 65000:
-                                self.coffin_next_at = now + 60000.0
-                                if just_synced or prev_min != 1:
-                                    self.log(
-                                        f"Đã khóa chính xác giờ mở bán ({msg_txt}, còn {int(rem_ms // 1000)}s) -> "
-                                        f"Kiểm tra lại sau 1 phút và xả ở 4 giây cuối!"
-                                    )
-                            else:
-                                self.coffin_next_at = max(now + 500.0, self.coffin_restock_at - 4000.0)
-                                self.log(
-                                    f"Canh Quan Tài: còn {int(rem_ms // 1000)}s nữa mở bán -> "
-                                    f"Đứng chờ và xả {self.coffin_threads} luồng ở 4 giây cuối!"
-                                )
-                        self.coffin_phase = "WAIT_RESTOCK"
-                        return True
-
-                    # wait_min == 0 ("0 phút nữa", còn < 60s cuối)
-                    if self.coffin_sec_synced:
-                        rem_ms = self.coffin_restock_at - now
-                        if rem_ms <= 4500:
-                            self.launch_coffin_burst(me, coffins, capsules, now, probe=True)
-                            return True
-                        self.coffin_next_at = max(now + 500.0, self.coffin_restock_at - 4000.0)
-                        self.coffin_phase = "WAIT_RESTOCK"
-                        if just_synced or prev_min != 0:
-                            self.log(
-                                f"Đã vào 60s cuối ({msg_txt}, còn đúng {int(rem_ms // 1000)}s) -> "
-                                f"Đứng chờ không xả sớm, đúng 4 giây cuối sẽ xả {self.coffin_threads} luồng!"
-                            )
-                        return True
-                    else:
-                        # Trường hợp bật tool lần đầu đúng lúc đã ở "0 phút nữa" (< 60s)
-                        self.coffin_restock_at = now + 15000.0
-                        self.coffin_next_at = now + 2000.0
-                        self.coffin_phase = "WAIT_RESTOCK"
-                        if prev_min != 0:
-                            self.log(f"Canh Quan Tài: {msg_txt} (< 1 phút cuối) | Đang dò nhẹ từng 2s chờ mở bán...")
-                        return True
-
-                if kind in ("no_currency", "bag_full"):
-                    self.coffin_hourly = False
-                    self.stop_coffin_buy(f"Dừng Canh Quan Tài ({msg_txt})", keep_hourly=False)
-                    return False
-
-            if now - self.coffin_phase_t > 1800:
-                self.mem.stop_all_autobuy(self.coffin_items)
-                self.coffin_items = []
-                self.coffin_shop_ready = False
-                self.coffin_phase = "OPEN_SHOP"
-                self.coffin_phase_t = 0.0
-            return True
-
-        if self.coffin_phase == "BURST":
-            bought_now = max(0, coffins - self.coffin_start_count)
-            if bought_now > self.coffin_last_logged_bought:
-                delta = bought_now - self.coffin_last_logged_bought
-                self.coffin_total_bought += delta
-                self.coffin_last_logged_bought = bought_now
-                self.log(f"Mua thành công +{delta} Hòm Halloween! (Đợt này: {bought_now}, Tổng túi: {coffins}, còn {capsules} Capsule)")
-
-            for ptr, text in self.info1_items():
-                if ptr in self.coffin_info_seen:
-                    continue
-                self.coffin_info_seen.add(ptr)
-                kind, wait_sec, msg_txt = parse_coffin_message(text)
-                if kind == "sold_out":
-                    coffins_after, _ = self.mem.count_bag_item(me, ITEM_ID_COFFIN)
-                    bought_now = max(0, coffins_after - self.coffin_start_count)
-                    if bought_now > self.coffin_last_logged_bought:
-                        self.coffin_total_bought += bought_now - self.coffin_last_logged_bought
-                        self.coffin_last_logged_bought = bought_now
-                    wait_min = wait_sec // 60
-                    # Khi đang xả ở 4 giây cuối (coffin_probe_mode=True):
-                    # Mọi thông báo "0 phút nữa" hoặc "1 phút nữa" (wait_min <= 1) đều là tin nhắn trước khi mở bán
-                    # (kể cả khi vừa mua được vài hộp đầu tiên mà tin nhắn cũ mới về tới) -> TUYỆT ĐỐI KHÔNG DỪNG!
-                    # Chỉ dừng khi server báo sang chu kỳ mới ("59 phút nữa", wait_min >= 2) hoặc quá 15 giây!
-                    if self.coffin_probe_mode and wait_min <= 1 and (now - self.coffin_phase_t) < 15000:
-                        return True
-
-                    # Khi server thông báo "59 phút nữa" (wait_min >= 2, đã bán hết sạch 1000 hòm):
-                    # DỪNG NGAY LẬP TỨC 100% các luồng Auto Mua!
-                    self.mem.stop_all_autobuy(self.coffin_items)
-                    self.coffin_items = []
-                    if self.coffin_hourly:
-                        if wait_min >= 50:
-                            self.coffin_restock_at = now + (wait_min + 1) * 60 * 1000.0 - 2000.0
-                            self.coffin_sec_synced = True
-                        else:
-                            self.coffin_restock_at = now + (wait_min + 0.5) * 60 * 1000.0
-                            self.coffin_sec_synced = False
-                        self.coffin_last_min = wait_min
-                        self.coffin_last_check_at = now
-                        self.coffin_next_at = now + 60000.0
-                        self.coffin_phase = "WAIT_RESTOCK"
-                        self.coffin_probe_mode = False
-                        self.coffin_force_burst = False
-                        self.log(
-                            f"Đã dừng Auto Mua ngay ({msg_txt}) | Đợt này mua: +{bought_now} Hòm (tổng túi: {coffins}) | "
-                            f"Kiểm tra lại sau 1 phút"
-                        )
-                    else:
-                        self.coffin_active = False
-                        self.coffin_phase = ""
-                        self.coffin_probe_mode = False
-                        self.coffin_force_burst = False
-                        self.log(f"Đã dừng Auto Mua ngay lập tức ({msg_txt}) | Đã mua: +{bought_now} Hòm Halloween")
-                    return True
-                if kind in ("no_currency", "bag_full"):
-                    self.coffin_hourly = False
-                    self.stop_coffin_buy(
-                        f"Đã dừng Auto Mua ngay lập tức ({msg_txt}) | Đã mua: +{bought_now} Hòm Halloween",
-                        keep_hourly=False,
-                    )
-                    return False
-
-            if empty_slots <= 0 and coffins <= 0:
-                self.coffin_hourly = False
-                self.stop_coffin_buy(
-                    f"Đã dừng Auto Mua ngay: hành trang đã đầy | Đã mua: +{bought_now} Hòm Halloween (tổng túi: {coffins})",
-                    keep_hourly=False,
-                )
-                return False
-
-            # Nếu xả ở 4 giây cuối đã chạy quá 15 giây mà chưa thấy thông báo 59 phút -> ngắt luồng và kiểm tra lại giờ
-            if self.coffin_probe_mode and (now - self.coffin_phase_t) >= 15000:
-                self.mem.stop_all_autobuy(self.coffin_items)
-                self.coffin_items = []
-                self.coffin_probe_mode = False
-                self.coffin_force_burst = False
-                self.coffin_sec_synced = False
-                self.coffin_next_at = now + 1000.0
-                self.coffin_phase = "WAIT_RESTOCK"
-                return True
-
-            rem = self.mem.remaining_autobuy_count(self.coffin_items)
-            # Bơm thêm số lượt mua trực tiếp vào bộ nhớ (không tạo thêm luồng mới để tránh treo game)
-            if rem < 300 and (now - self.coffin_phase_t) < 15000 and self.coffin_items:
-                try:
-                    self.mem.write(self.coffin_items[0] + 0x14, struct.pack("<i", self.coffin_threads * 150))
-                    rem = self.coffin_threads * 150
-                except OSError:
-                    pass
-            if rem <= 0 and now - self.coffin_phase_t > 600:
-                self.stop_coffin_buy(
-                    f"Đã hoàn tất & dừng Auto Mua Quan Tài | Đợt này mua: +{bought_now} Hòm Halloween (tổng túi: {coffins})",
-                    keep_hourly=self.coffin_hourly,
-                )
-                if self.coffin_hourly:
-                    self.coffin_next_at = now + 60000.0
-                    self.coffin_phase = "WAIT_RESTOCK"
-                return False
-            return True
-        return False
 
     def save_mod_flags(self):
         saved = []
@@ -3735,7 +3545,7 @@ class BossHunter:
             self.xmap_tries = 0
 
     def tick(self):
-        if not self.enabled and not self.quest_mode and not self.coffin_active and not self.coffin_hourly and not self.egg_active and not self.egg_single_action and not self.empty_zone:
+        if not self.enabled and not self.quest_mode and not self.sword_active and not self.egg_active and not self.egg_single_action and not self.empty_zone:
             return
         cfg = self.get_cfg()
         now = time.monotonic() * 1000.0
@@ -3752,8 +3562,8 @@ class BossHunter:
             if self.egg_tick(me, cur_map, cur_zone, now):
                 return
 
-        if self.coffin_active or self.coffin_hourly:
-            if self.coffin_tick(me, cur_map, cur_zone, now):
+        if self.sword_active:
+            if self.sword_tick(me, cur_map, cur_zone, now):
                 return
         # Khu trống: chỉ khi không bận săn boss / làm nhiệm vụ (đang săn thì bộ săn tự lo đổi khu) và còn sống
         if self.empty_zone and self.state == "IDLE" and not self.quest_mode and self.mem.num(me + 0xD0, "<q") > 0:
@@ -4008,7 +3818,6 @@ class Game:
         self.filter_junk = filter_junk
         self.auto_item = auto_item
         self.auto_item_init = False
-        self.coffin_init = False
         self.pending_login = pending_login
         self.account = (pending_login["user"], pending_login.get("pass", "")) if pending_login and pending_login.get("user") else None
         self.account_trusted = bool(self.account)  # tài khoản do bảng đăng nhập / nhận theo tên nhân vật, không đoán từ Rms chung
@@ -4040,7 +3849,7 @@ class PanelApp:
         self.patched_dlls = set()
         self.ensure_dll_patched(self.cfg.get("exePath"))
 
-        root.title("Bảng điều khiển treo game, Đăng Nhập Ngầm, Auto Item, Auto Mua Quan Tài, Nhiệm Vụ & Săn BOSS - NgocRongViet")
+        root.title("Bảng điều khiển treo game, Đăng Nhập Ngầm, Auto Item, Kiếm Z, Nhiệm Vụ & Săn BOSS - NgocRongViet")
         root.geometry("1360x890")
         top = ttk.Frame(root, padding=(6, 4))
         top.pack(fill="x")
@@ -4161,38 +3970,25 @@ class PanelApp:
         ent_custom.bind("<Return>", lambda _e: self.save_opts())
         ttk.Button(custom_box, text="Áp dụng", command=self.save_opts).pack(side="left", padx=2)
 
-        # ---------- Khu vực Auto Mua Quan Tài - Hòm Halloween (Shop Santa) ----------
-        coffin_frame = ttk.LabelFrame(
+        # ---------- Khu vực tự đổi + nâng cấp Kiếm Z ----------
+        sword_frame = ttk.LabelFrame(
             root,
-            text="Auto Mua Quan Tài - Hòm Halloween (Shop Santa: bắn song song đa luồng tranh 1000 hòm & tự dừng ngay khi xong)",
+            text="Kiếm Z (đổi Vĩnh viễn ở Tổ Sư Kaio tới khi đầy hành trang -> nâng cấp ở NPC Mai, Hành tinh ngục tù 2)",
             padding=(6, 4),
         )
-        coffin_frame.pack(fill="x", padx=6, pady=(0, 4))
-        ttk.Label(coffin_frame, text="Số luồng song song:").pack(side="left")
-        self.var_coffin_threads = tk.IntVar(value=self.cfg.get("coffinThreads", 10))
-        ttk.Spinbox(coffin_frame, from_=1, to=30, width=4, textvariable=self.var_coffin_threads, command=self.save_opts).pack(
-            side="left", padx=(2, 8)
-        )
-        ttk.Label(coffin_frame, text="Số lần/luồng:").pack(side="left")
-        self.var_coffin_qty = tk.IntVar(value=self.cfg.get("coffinQty", 100))
-        ttk.Spinbox(coffin_frame, from_=10, to=500, increment=10, width=5, textvariable=self.var_coffin_qty, command=self.save_opts).pack(
-            side="left", padx=(2, 8)
-        )
-        ttk.Label(coffin_frame, text="Delay mỗi luồng (ms):").pack(side="left")
-        self.var_coffin_delay = tk.IntVar(value=self.cfg.get("coffinDelayMs", 80))
-        ttk.Spinbox(coffin_frame, from_=20, to=400, increment=10, width=5, textvariable=self.var_coffin_delay, command=self.save_opts).pack(
-            side="left", padx=(2, 8)
-        )
-        ttk.Button(coffin_frame, text="Bắn Auto Mua Ngay (Đa luồng)", command=self.start_coffin_now_selected).pack(side="left", padx=3)
-        ttk.Button(coffin_frame, text="Canh Mua 1h/lần (Bật/Tắt)", command=self.toggle_coffin_hourly_selected).pack(side="left", padx=3)
-        ttk.Button(coffin_frame, text="Dừng Auto Mua Ngay", command=self.stop_coffin_selected).pack(side="left", padx=3)
-        self.var_auto_coffin = tk.BooleanVar(value=self.cfg.get("autoCoffin", True))
-        ttk.Checkbutton(
-            coffin_frame,
-            text="Tự động bật Canh & Mua Quan Tài khi vào game",
-            variable=self.var_auto_coffin,
-            command=self.on_toggle_auto_coffin,
-        ).pack(side="left", padx=(8, 0))
+        sword_frame.pack(fill="x", padx=6, pady=(0, 4))
+        self.sword_vars = {}
+        for key, label, default, hi in (("swordMinNew", "Kiếm mới: giữ khi sức đánh >= (%)", 5, 50),
+                                        ("swordMaxLevel", "Nâng tới cấp +", 6, 16),
+                                        ("swordMinFinal", "Đủ cấp: giữ khi sức đánh > (%)", 30, 200)):
+            ttk.Label(sword_frame, text=label).pack(side="left")
+            self.sword_vars[key] = tk.IntVar(value=self.cfg.get(key, default))
+            ttk.Spinbox(sword_frame, from_=1, to=hi, width=4, textvariable=self.sword_vars[key], command=self.save_opts).pack(
+                side="left", padx=(2, 8)
+            )
+        ttk.Button(sword_frame, text="Tự đổi Kiếm Z (Bật/Tắt)", command=self.toggle_sword_selected).pack(side="left", padx=3)
+        self.lbl_sword_status = ttk.Label(sword_frame, text="Đang dừng", foreground="#1a73e8", font=("Segoe UI", 9, "bold"))
+        self.lbl_sword_status.pack(side="left", padx=(10, 0))
 
         # ---------- Khu vực Auto Ấp Trứng Nhanh & Mua Đá Linh Lực (Mốc 1 Ngày) ----------
         egg_frame = ttk.LabelFrame(
@@ -4296,7 +4092,7 @@ class PanelApp:
             with self.lock:
                 games = list(self.games.values())
             for g in games:
-                if g.boss.enabled or g.boss.quest_mode or g.boss.coffin_active or g.boss.coffin_hourly or g.boss.egg_active or g.boss.egg_single_action or g.boss.empty_zone:
+                if g.boss.enabled or g.boss.quest_mode or g.boss.sword_active or g.boss.egg_active or g.boss.egg_single_action or g.boss.empty_zone:
                     try:
                         g.boss.tick()
                     except Exception:
@@ -4401,11 +4197,6 @@ class PanelApp:
                         g.auto_item_init = True
                         if g.status.get("autoItemCount", 0) > 0:
                             g.auto_item = True
-                    if not g.coffin_init:
-                        g.coffin_init = True
-                        if self.cfg.get("autoCoffin", True) and (g.status.get("capsuleCount", 0) >= 20 or g.status.get("mapId") in SANTA_MAPS):
-                            threads, qty, delay_ms = self.get_coffin_opts()
-                            g.boss.set_coffin_hourly(True, threads, qty, delay_ms)
                     if g.pending_login:
                         if g.pending_login.get("auto_login", True) and not g.reconnect:
                             g.mem.set_flag("al", True)
@@ -4418,13 +4209,13 @@ class PanelApp:
                     if (g.status.get("flags") or {}).get("al"):
                         u, p = g.account if (g.account_trusted and g.account) else (None, None)
                         g.mem.ensure_auto_login_bound(u, p)
-                    coffin_busy = g.boss.coffin_active and g.boss.coffin_phase in ("INIT", "TRAVEL", "OPEN_SHOP", "CHECK_TIME", "BURST")
+                    sword_busy = g.boss.sword_active  # đang tự đổi/nâng Kiếm Z: không đụng vào hành trang, mua nhanh cần đủ FPS
                     if g.hidden:
-                        g.mem.set_fps(60 if coffin_busy else g.hidden_fps)
-                    if not coffin_busy and (g.auto_item or g.mem.panel_auto_ids):  # chưa bật trên bảng thì không đụng vào Auto Item của MOD
+                        g.mem.set_fps(60 if sword_busy else g.hidden_fps)
+                    if not sword_busy and (g.auto_item or g.mem.panel_auto_ids):  # chưa bật trên bảng thì không đụng vào Auto Item của MOD
                         g.status["autoItemCount"] = g.mem.sync_auto_items(g.auto_item, target_ids, target_names)
-                    # Không vứt đồ rác đúng lúc đang giao chiến với boss hoặc đang bắn Auto Mua Quan Tài
-                    if not coffin_busy and g.filter_junk and g.status.get("junkSlots") and g.boss.state != "FIGHT":
+                    # Không vứt đồ rác đúng lúc đang giao chiến với boss hoặc đang tự đổi/nâng Kiếm Z
+                    if not sword_busy and g.filter_junk and g.status.get("junkSlots") and g.boss.state != "FIGHT":
                         threw = False
                         for slot in reversed(g.status["junkSlots"][-5:]):
                             if g.mem.throw_bag_item(slot):
@@ -4432,7 +4223,6 @@ class PanelApp:
                         if threw:
                             g.status = g.mem.status()
                 else:
-                    g.boss.coffin_shop_ready = False
                     if g.hidden:
                         g.mem.set_fps(max(15, g.hidden_fps))
                     now = time.monotonic()
@@ -4517,6 +4307,7 @@ class PanelApp:
             tv, _ = first_game.mem.count_bag_item(me_ptr, ITEM_ID_THOI_VANG) if me_ptr else (0, 0)
             txt = f"Trạng thái: {bh.egg_status_text} | Đã giảm: {bh.egg_days_reduced} ngày | Đã mua: {bh.egg_stones_bought} Đá LL | Nở: {bh.egg_hatched_count} quả | Còn: {da_ll} Đá LL, {tv} TV"
             self.lbl_egg_status.config(text=txt)
+            self.lbl_sword_status.config(text=bh.sword_status_text)
             self.btn_egg_toggle.config(text="DỪNG AUTO ẤP TRỨNG" if bh.egg_active else "BẮT ĐẦU AUTO ẤP TRỨNG")
         self.root.after(1000, self.refresh_ui)
 
@@ -4527,11 +4318,7 @@ class PanelApp:
             where = f'{s["map"]} - khu {s["zone"]}'
             hp = f'{s["hp"]:,}/{s["hpFull"]:,}'
             mp = f'{s["mp"]:,}/{s["mpFull"]:,}'
-            coffin_cnt = s.get("coffinCount", 0)
-            if coffin_cnt > 0 or g.boss.coffin_hourly or g.boss.coffin_active:
-                bag_info = f'{s.get("bagUsed", 0)} ({s.get("skhCount", 0)} SKH, {coffin_cnt} QT)'
-            else:
-                bag_info = f'{s.get("bagUsed", 0)} ({s.get("skhCount", 0)} SKH)'
+            bag_info = f'{s.get("bagUsed", 0)} ({s.get("skhCount", 0)} SKH)'
             q = s.get("quest")
             if q and not q.get("done"):
                 cnt_txt = f' ({max(0, q["progress"])}/{q["need"]})' if q.get("need", -1) > 1 else ""
@@ -4558,10 +4345,8 @@ class PanelApp:
             flag_list.append("Làm NV")
         if g.boss.egg_active:
             flag_list.append("Ấp trứng")
-        if g.boss.coffin_hourly:
-            flag_list.append("Canh QT 1h")
-        elif g.boss.coffin_active:
-            flag_list.append("Auto Mua QT")
+        if g.boss.sword_active:
+            flag_list.append("Kiếm Z")
         flags = ", ".join(flag_list)
         picked = "" if s.get("picked") is None else s["picked"]
         dropped = s.get("dropped", 0)
@@ -4864,76 +4649,6 @@ class PanelApp:
                 except OSError:
                     pass
 
-    def get_coffin_opts(self):
-        try:
-            threads = max(1, min(30, int(self.var_coffin_threads.get())))
-        except (tk.TclError, ValueError):
-            threads = 10
-        try:
-            qty = max(1, min(1000, int(self.var_coffin_qty.get())))
-        except (tk.TclError, ValueError):
-            qty = 100
-        try:
-            delay_ms = max(20, min(2000, int(self.var_coffin_delay.get())))
-        except (tk.TclError, ValueError):
-            delay_ms = 80
-        return threads, qty, delay_ms
-
-    def start_coffin_now_selected(self):
-        pids = self.selected() or list(self.games.keys())
-        if not pids:
-            messagebox.showinfo("Auto Mua Quan Tài", "Chưa có tiến trình game nào đang mở.")
-            return
-        self.save_opts()
-        threads, qty, delay_ms = self.get_coffin_opts()
-        for pid in pids:
-            g = self.games.get(pid)
-            if g:
-                try:
-                    g.boss.trigger_coffin_now(threads, qty, delay_ms)
-                except OSError:
-                    pass
-
-    def toggle_coffin_hourly_selected(self):
-        pids = self.selected() or list(self.games.keys())
-        if not pids:
-            messagebox.showinfo("Canh Mua Quan Tài 1h/lần", "Chưa có tiến trình game nào đang mở.")
-            return
-        self.save_opts()
-        threads, qty, delay_ms = self.get_coffin_opts()
-        first_game = self.games.get(pids[0])
-        target = not (first_game.boss.coffin_hourly if first_game else False)
-        for pid in pids:
-            g = self.games.get(pid)
-            if g:
-                try:
-                    g.boss.set_coffin_hourly(target, threads, qty, delay_ms)
-                except OSError:
-                    pass
-
-    def on_toggle_auto_coffin(self):
-        on = bool(self.var_auto_coffin.get())
-        self.save_opts()
-        threads, qty, delay_ms = self.get_coffin_opts()
-        for g in list(self.games.values()):
-            try:
-                g.boss.set_coffin_hourly(on, threads, qty, delay_ms)
-            except OSError:
-                pass
-
-    def stop_coffin_selected(self):
-        pids = self.selected() or list(self.games.keys())
-        for pid in pids:
-            g = self.games.get(pid)
-            if g:
-                try:
-                    g.boss.coffin_hourly = False
-                    g.boss.stop_coffin_buy("Đã dừng khẩn cấp toàn bộ luồng Auto Mua Quan Tài", keep_hourly=False)
-                    if g.hidden:
-                        g.mem.set_fps(g.hidden_fps)
-                except OSError:
-                    pass
-
     def on_toggle_all_filter(self):
         on = self.var_filter.get()
         for g in list(self.games.values()):
@@ -5018,6 +4733,35 @@ class PanelApp:
             self.cfg["exePath"] = os.path.abspath(path)
             self.ensure_dll_patched(self.cfg["exePath"])
             save_config(self.cfg)
+
+    def get_sword_opts(self):
+        out = []
+        for key, default in (("swordMinNew", 5), ("swordMaxLevel", 6), ("swordMinFinal", 30)):
+            try:
+                out.append(max(1, int(self.sword_vars[key].get())))
+            except (tk.TclError, ValueError):
+                out.append(default)
+        return out
+
+    def toggle_sword_selected(self):
+        pids = self.selected()
+        if not pids:
+            messagebox.showinfo("Kiếm Z", "Chọn dòng nhân vật cần tự đổi Kiếm Z trước.")
+            return
+        self.save_opts()
+        first_game = self.games.get(pids[0])
+        target = not (first_game.boss.sword_active if first_game else False)
+        if target and not messagebox.askyesno(
+            "Kiếm Z", "Bảng sẽ VỨT HẲN mọi Kiếm Z không đạt ngưỡng (kể cả kiếm đang có sẵn trong hành trang).\nTiếp tục?"
+        ):
+            return
+        for pid in pids:
+            g = self.games.get(pid)
+            if g:
+                try:
+                    g.boss.set_sword_auto(target, *self.get_sword_opts())
+                except OSError:
+                    pass
 
     def get_egg_opts(self):
         try:
@@ -5112,11 +4856,7 @@ class PanelApp:
         self.cfg["loginAutoItem"] = bool(self.var_login_auto_item.get())
         self.cfg["autoItems"] = {k: bool(v.get()) for k, v in self.auto_item_vars.items()}
         self.cfg["customAutoItems"] = self.var_custom_items.get().strip()
-        threads, qty, delay_ms = self.get_coffin_opts()
-        self.cfg["coffinThreads"] = threads
-        self.cfg["coffinQty"] = qty
-        self.cfg["coffinDelayMs"] = delay_ms
-        self.cfg["autoCoffin"] = bool(self.var_auto_coffin.get())
+        self.cfg["swordMinNew"], self.cfg["swordMaxLevel"], self.cfg["swordMinFinal"] = self.get_sword_opts()
         egg_delay, egg_target, egg_buy_stone, egg_buy_egg, egg_use_egg = self.get_egg_opts()
         self.cfg["eggDelayMs"] = egg_delay
         self.cfg["eggTargetDays"] = egg_target
@@ -5124,10 +4864,6 @@ class PanelApp:
         self.cfg["eggAutoBuyEgg"] = egg_buy_egg
         self.cfg["eggAutoUseEgg"] = egg_use_egg
         save_config(self.cfg)
-        for g in list(self.games.values()):
-            g.boss.coffin_threads = threads
-            g.boss.coffin_qty = qty
-            g.boss.coffin_delay = delay_ms
         t_ids, t_names = self.get_target_auto_items()
         for g in list(self.games.values()):
             if g.auto_item:
@@ -5149,10 +4885,9 @@ class PanelApp:
                     g.boss.set_quest_mode(False)
                 except OSError:
                     pass
-            if g.boss.coffin_active or g.boss.coffin_hourly:
+            if g.boss.sword_active:
                 try:
-                    g.boss.coffin_hourly = False
-                    g.boss.stop_coffin_buy("", keep_hourly=False)
+                    g.boss.stop_sword_auto("")
                 except OSError:
                     pass
             if g.hidden:
